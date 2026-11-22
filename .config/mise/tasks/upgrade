@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description="Upgrade the tools in mise.toml (all, or the named ones)"
+#USAGE arg "[tools]..." help="Tools to upgrade"
+set -euo pipefail
+
+# mise passes usage args only as usage_* variables, and the list must split into words.
+# shellcheck disable=SC2086
+mise upgrade --bump ${usage_tools:-}

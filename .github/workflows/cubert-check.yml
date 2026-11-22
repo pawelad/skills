@@ -1,0 +1,27 @@
+---
+# Template-owned: edit in cubert, not in a project. The project's ci.yml calls it.
+name: "cubert check"
+
+on:
+  workflow_call:
+
+permissions:
+  contents: "read"
+
+jobs:
+  check:
+    name: "Check"
+    runs-on: "ubuntu-24.04"
+    timeout-minutes: 20
+    steps:
+      - name: "Check out the repository"
+        uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Set up mise"
+        uses: "$/.github/actions/setup-mise"
+
+      # A project replaces `ci:check` in mise.toml when other jobs run its slow suites.
+      - name: "Run the checks and tests"
+        run: "mise run ci:check"

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+#MISE description="Run hk on every file and the repository guards"
+set -euo pipefail
+
+status=0
+fail() {
+  echo "check:repo: $1" >&2
+  echo "  Fix: $2" >&2
+  status=1
+}
+
+# A local core.hooksPath shadows hk's global config-based hooks, so they stop with no error.
+if [ -n "$(git config --local --get core.hooksPath || true)" ]; then
+  fail "core.hooksPath is set locally, which disables hk's global git hooks." \
+    "git config --local --unset core.hooksPath"
+fi
+
+if [ -z "${CI:-}" ]; then
+  hook="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)/hooks/post-checkout"
+  chained=false
+  # Match the installer's delegation command; the delegated copy must stay current too.
+  if [ -x "$hook" ] && [ -x "$hook.cubert" ] && cmp -s "$hook.cubert" .config/git/post-checkout; then
+    if grep -F "\"$hook.cubert\" \"\$@\"" "$hook" | grep -qE '^[[:space:]]*(exec[[:space:]]+)?"'; then
+      chained=true
+    fi
+  fi
+  if [ "$chained" = false ] && { [ ! -x "$hook" ] || ! cmp -s "$hook" .config/git/post-checkout; }; then
+    fail "the post-checkout worktree hook is missing or out of date at $hook." "mise run hooks:install"
+  fi
+fi
+
+files="$(git ls-files --cached --others --exclude-standard)"
+
+claude_files="$(grep -E '(^|/)CLAUDE\.md$' <<<"$files" || true)"
+if [ -n "$claude_files" ]; then
+  fail "CLAUDE.md found: ${claude_files//$'\n'/ }. Agents read AGENTS.md." "delete it"
+fi
+
+while IFS= read -r nested; do
+  [ -n "$nested" ] || continue
+  if ! grep -qF "($nested)" AGENTS.md && ! grep -qF "(./$nested)" AGENTS.md; then
+    fail "$nested is not linked from the root AGENTS.md." "add it to the Map section"
+  fi
+done < <(grep -E '/AGENTS\.md$' <<<"$files" || true)
+
+# Report every failing step. The git hooks keep fail_fast for quick feedback.
+.config/hk/checks/check_lockfile.py || status=1
+hk check --all --no-fail-fast || status=1
+exit "$status"

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+#MISE description="Fail if a newer cubert template version exists"
+set -euo pipefail
+
+# Exit status 2 means that a newer version exists. Any other failure is an error.
+status=0
+copier check-update --quiet || status=$?
+if [ "$status" -eq 2 ]; then
+  echo "template:check: a newer cubert version exists. Run: mise run template:update" >&2
+fi
+exit "$status"

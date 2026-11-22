@@ -1,0 +1,24 @@
+.env
+tmp
+
+.mise/*
+!.mise/locks/
+
+# Agent dirs. worktree:setup links them to the primary checkout.
+.agent
+.agents
+.claude
+.codex
+.gemini
+.impeccable
+.opencode
+.pi
+.idea/
+
+*.rej
+__pycache__/
+.venv/
+.mypy_cache/
+.ruff_cache/
+
+# Project

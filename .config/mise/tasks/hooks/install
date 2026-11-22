@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#MISE description="Install the hk git hooks and the post-checkout worktree hook"
+set -euo pipefail
+
+# hk skips this when ~/.gitconfig already has global hk hooks.
+hk install --mise
+hooks_dir="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)/hooks"
+mkdir -p "$hooks_dir"
+
+# Only our header permits replacement; a project hook can call worktree:setup too.
+target="$hooks_dir/post-checkout"
+# shellcheck disable=SC2016
+if [ -e "$target" ] && ! head -n 2 "$target" | grep -qFx '# Template-owned. `mise run hooks:install` copies it to the git hooks dir.'; then
+  target="$hooks_dir/post-checkout.cubert"
+  echo "hooks:install: $hooks_dir/post-checkout exists and is not cubert's." >&2
+  echo "hooks:install: add this line to it so new worktrees get set up: \"$target\" \"\$@\"" >&2
+fi
+cp .config/git/post-checkout "$target"
+chmod +x "$target"

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+#MISE description="Scan uv.lock, bun.lock and script locks for known vulnerabilities (needs the network)"
+set -euo pipefail
+
+args=()
+while IFS= read -r lock; do
+  case "$lock" in
+    # A PEP 723 script lock (`uv lock --script`) is a uv.lock under another name.
+    *.py.lock) args+=(--lockfile "uv.lock:$lock") ;;
+    *) args+=(--lockfile "$lock") ;;
+  esac
+done < <(git ls-files --cached --others --exclude-standard | grep -E '(^|/)(uv|bun)\.lock$|\.py\.lock$' || true)
+
+if [ "${#args[@]}" -eq 0 ]; then
+  echo "audit:deps: no uv.lock, bun.lock or script lock, so nothing to scan."
+  exit 0
+fi
+if ! command -v osv-scanner >/dev/null; then
+  echo "audit:deps: osv-scanner is missing. Fix: mise run setup" >&2
+  exit 1
+fi
+osv-scanner scan source "${args[@]}"

@@ -1,0 +1,216 @@
+// Template-owned: edit in cubert, not in a project. Project steps go in `hk.pkl`.
+amends "package://github.com/jdx/hk/releases/download/v2.11.1/hk@2.11.1#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v2.11.1/hk@2.11.1#/Builtins.pkl"
+
+exclude = List("**/.git/**", ".mise/**", ".copier-answers.yml")
+
+fail_fast = true
+
+// Unicode escapes and bracketed classes keep this file from matching its own patterns.
+local emDash = "\u{2014}"
+// Stems carry their own suffix group, so `-isation` and `-ising` match too.
+// The bracketed spellings are on purpose, so typos skips this line.
+local britishEnglish = "(organi|customi|optimi|minimi|maximi|initiali|reali|normali|seriali|recogni|authori|categori|prioriti|summari|synchroni|standardi|personali|randomi|saniti|tokeni|finali|locali|capitali|speciali|generali|visuali|moderni|publici|emphasi)s(e|es|ed|er|ers|ing|ation|ations)|analys[e]([^s]|$)|analys(ed|er|ing)|favo[u]rite|colo[u]r|behavio[u]r|labo[u]r|hono[u]r|neighbo[u]r|humo[u]r|rumo[u]r|flavo[u]r|endeavo[u]r|harbo[u]r|vapo[u]r|armo[u]r|odo[u]r|savio[u]r|lice[n]ce|defe[n]ce|offe[n]ce|prete[n]ce|practis(e|ed|es|ing)|cent[r]e|met[r]e|lit[r]e|theat[r]e|fib[r]e|calib[r]e|arte[f]act|specialit(y|ies)|enquir(y|ies|e|ed|ing)|whils[t]|amongs[t]|learn[t]|agein[g]|cheq[u]e|alumini[u]m|manoeuv[r]|marvello[u]s|jewelle[r]y|skilfu[l]|instalmen[t]|enrolmen[t]|scepti[c]|gre[y]" // spellchecker:disable-line
+local emoji = "[\\x{1F300}-\\x{1FAFF}\\x{2600}-\\x{27BF}]"
+
+// Prose rules apply to prose in full, and to comments in code. They skip string values,
+// identifiers and config values: those can name an external API or a fixture.
+local proseFiles = List("*.md", "*.txt")
+local codeFiles = List("*.py", "*.sh", "*.ts", "*.tsx", "*.js", "*.mjs", "*.toml", "*.yaml", "*.yml", "*.pkl", "*.tf", "*.j2", "*.sql")
+local commentFiles = codeFiles + List("*.css")
+// A line that starts with a comment marker. Trailing comments and docstrings are skipped:
+// a regex cannot tell them from a `#` or `"""` inside a string.
+local commentLine = "^[[:space:]]*(#|//|--|/\\*|\\*)"
+// Archived changes keep their text as written, the schema fork keeps upstream text, and
+// the rest is text that another program wrote or that must match an external system.
+local frozen = List("**/openspec/changes/archive/**", "**/openspec/schemas/**", "**/fixtures/**", "**/testdata/**", "**/__snapshots__/**", "**/generated/**", "**/vendor/**")
+
+steps {
+  // `correctness` runs actionlint's checks only: zizmor owns the security rules.
+  // TODO: revisit dropping zizmor for the jactionlint default profile once jactionlint matures.
+  ["jactionlint"] = (Builtins.jactionlint) {
+    check { command { argv = List("jactionlint", "--profile", "correctness", "--format", "gcc", "{{files}}") } }
+    check_diff { command { argv = List("hk", "util", "sarif-diff", "--", "jactionlint", "--profile", "correctness", "--format", "sarif", "{{files}}") } }
+    fix { command { argv = List("jactionlint", "--profile", "correctness", "--fix", "{{files}}") } }
+    env {
+      ["SHELLCHECK_OPTS"] = "--exclude=SC1090 --exclude=SC2046 --exclude=SC2086 --exclude=SC2129"
+    }
+  }
+  // Finds private keys, tokens and passwords.
+  ["betterleaks"] = Builtins.betterleaks
+  ["check-added-large-files"] = (Builtins.check_added_large_files) {
+    exclude = List("**/*.lock")
+  }
+  ["check-byte-order-marker"] = Builtins.byte_order_marker
+  ["check-case-conflict"] = Builtins.check_case_conflict
+  ["check-merge-conflict"] = Builtins.check_merge_conflict
+  ["comment-length"] = new Step {
+    glob = List("*.py", "*.ts", "*.tsx", "*.js", "*.mjs")
+    exclude = List("**/migrations/**")
+    check = ".config/hk/checks/check_comment_length.py {{files}}"
+  }
+  ["destroyed-symlinks"] = Builtins.destroyed_symlinks
+  ["docs-no-todo"] = new Step {
+    glob = List("docs/**/*.md")
+    check = """
+      if grep -nHw 'TODO' {{files}}; then
+        echo 'docs/ states how the system is. Put a real gap in a TODO comment at the code that owns it.' >&2
+        exit 1
+      fi
+      """
+  }
+  ["dprint"] = Builtins.dprint
+  ["executable-shebangs"] = new Step {
+    glob = List("**/*")
+    // A Jinja template runs only after Ansible renders it, which sets the mode there.
+    exclude = List("**/*.j2")
+    check = """
+      bad=0
+      for f in {{files}}; do
+        if [ "$(head -c 2 "$f")" = '#!' ] && [ ! -x "$f" ]; then
+          echo "$f: has a shebang but is not executable (chmod +x)" >&2
+          bad=1
+        fi
+      done
+      exit "$bad"
+      """
+  }
+  ["file-length"] = new Step {
+    glob = List("*.py", "*.ts", "*.tsx")
+    exclude = List("**/migrations/**")
+    check = ".config/hk/checks/check_file_length.py {{files}}"
+  }
+  // Its fixer would rewrite verbatim external text, such as recorded API responses.
+  ["fix-smart-quotes"] = (Builtins.fix_smart_quotes) {
+    exclude = frozen
+  }
+  ["forbid-submodules"] = Builtins.forbid_submodules
+  // Offline, so it checks relative links only. `mise run audit` checks the URLs. A root
+  // `lychee.toml` layers on the shared config, which lychee would not load by itself.
+  ["lychee"] = (Builtins.lychee) {
+    glob = List("*.md")
+    exclude = frozen
+    check = """
+      config='--config .config/lychee.toml'
+      if [ -f lychee.toml ]; then config="$config --config lychee.toml"; fi
+      lychee --offline --no-progress $config {{files}}
+      """
+  }
+  ["mixed-line-ending"] = Builtins.mixed_line_ending
+  ["newlines"] = Builtins.newlines
+  ["no-british-english"] = new Step {
+    glob = proseFiles
+    exclude = frozen
+    check = "grep -inHE '\(britishEnglish)' {{files}} && exit 1 || exit 0"
+  }
+  ["no-british-english-comments"] = new Step {
+    glob = commentFiles
+    exclude = frozen
+    check = "grep -inHE '\(commentLine).*(\(britishEnglish))' {{files}} && exit 1 || exit 0"
+  }
+  // A run of # counts only alone on its line: `###### Fine print` is a Markdown heading.
+  ["no-dividers"] = new Step {
+    glob = codeFiles
+    exclude = frozen
+    check = """
+      if grep -nHE '^[[:space:]]*(#|//|--)[[:space:]]*([-=*~]{5,}|#{5,}[[:space:]]*$)' {{files}}; then
+        echo 'Remove decorative comment dividers and banners.' >&2
+        exit 1
+      fi
+      """
+  }
+  ["no-em-dashes"] = new Step {
+    glob = proseFiles
+    exclude = frozen
+    check = "grep -nH -- '\(emDash)' {{files}} && exit 1 || exit 0"
+    fix = "perl -pi -e 's/\(emDash)/-/g' {{files}}"
+  }
+  // The fixer rewrites comment lines only, so a string in code stays as written.
+  ["no-em-dashes-comments"] = new Step {
+    glob = commentFiles
+    exclude = frozen
+    check = "grep -nHE '\(commentLine).*\(emDash)' {{files}} && exit 1 || exit 0"
+    fix = "perl -pi -e 's/\(emDash)/-/g if m{\(commentLine)}' {{files}}"
+  }
+  ["no-emojis"] = new Step {
+    glob = proseFiles
+    exclude = frozen
+    check = "perl -CSD -ne 'if (/\(emoji)/) { print \"$ARGV:$.: $_\"; $bad = 1 } close ARGV if eof; END { exit($bad ? 1 : 0) }' {{files}}"
+  }
+  ["no-emojis-comments"] = new Step {
+    glob = commentFiles
+    exclude = frozen
+    check = "perl -CSD -ne 'if (m{\(commentLine)} && /\(emoji)/) { print \"$ARGV:$.: $_\"; $bad = 1 } close ARGV if eof; END { exit($bad ? 1 : 0) }' {{files}}"
+  }
+  ["pins"] = new Step {
+    glob = List("mise.toml")
+    check = ".config/hk/checks/check_pins.py {{files}}"
+  }
+  ["lockfile"] = new Step {
+    glob = List("mise.lock")
+    check = ".config/hk/checks/check_lockfile.py"
+  }
+  ["pkl"] = Builtins.pkl
+  ["required-tools"] = new Step {
+    glob = List("mise.toml", ".config/mise/required-tools")
+    check = ".config/hk/checks/check_required_tools.py"
+  }
+  // Both match by shebang too, so extensionless file tasks and git hooks are covered.
+  ["shellcheck"] = Builtins.shellcheck
+  ["shfmt"] = Builtins.shfmt
+  ["test-naming"] = new Step {
+    glob = List("**/test_*.py", "**/*_test.py", "**/*.test.*", "**/*.spec.*")
+    check = """
+      if grep -niHE '(def test_|class Test|(^|[^a-z])(it|test|describe)\\().*regression' {{files}}; then
+        echo 'Name a test after the behavior it asserts, not "regression".' >&2
+        exit 1
+      fi
+      """
+  }
+  ["trailing-whitespace"] = Builtins.trailing_whitespace
+  // Spelling only: the prose rules own the American English check. The config makes a
+  // trailing `spellchecker:disable-line` comment skip a line. A project adds words in a
+  // root `typos.toml`, which layers on it. The builtin has no config option.
+  ["typos"] = (Builtins.typos) {
+    exclude = frozen
+    // A fixer would rewrite a false positive in code without asking.
+    fix = null
+    // hk prints nothing from a check_diff in check mode, so the failure named no word.
+    check_diff = null
+    check = "typos --config .config/typos.toml --force-exclude --format brief {{files}}"
+  }
+  ["yamllint"] = Builtins.yamllint
+  // Security audits for workflows and actions: injection, credentials, pinning.
+  ["zizmor"] = Builtins.zizmor
+}
+
+// `check`, `fix` and `pre-commit` are implicit hooks built from `steps`.
+hooks {
+  // No implicit pre-push hook exists, so reuse the steps. `module` binds late, so project steps count.
+  ["pre-push"] {
+    steps = module.steps
+  }
+  ["commit-msg"] {
+    steps {
+      // fixup!, squash! and amend! commits are folded away before they reach main.
+      ["conventional-commit"] = new Step {
+        check = "if head -n 1 {{commit_msg_file}} | grep -qE '^(fixup|squash|amend)!'; then exit 0; else mise x -- hk util check-conventional-commit {{commit_msg_file}}; fi"
+      }
+      // One concept gets one scope, so `spot_lists` cannot drift from `spot-lists`.
+      ["commit-scope"] = new Step {
+        check = "if head -n 1 {{commit_msg_file}} | grep -qE '^[a-z]+\\([^)]*[^a-z0-9)-]'; then echo 'Commit scopes must be kebab-case.' >&2; exit 1; fi"
+      }
+      // A changelog line must name an area from cliff.toml, when the project lists areas.
+      ["changelog-scope"] = new Step {
+        check = ".config/hk/checks/check_commit_scope.py --file {{commit_msg_file}}"
+      }
+      // Git strips `#` lines after this hook runs, so they are skipped here.
+      ["commit-msg-wording"] = new Step {
+        check = "! grep -v '^#' {{commit_msg_file}} | grep -niE -e '\(emDash)' -e '\(britishEnglish)'"
+      }
+      ["no-co-authored-by"] = new Step {
+        check = "if grep -qi '^co-authored-by:' {{commit_msg_file}}; then echo 'Remove the Co-Authored-By trailer.' >&2; exit 1; fi"
+      }
+    }
+  }
+}

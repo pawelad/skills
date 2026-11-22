@@ -1,0 +1,27 @@
+# Template-owned: edit in cubert, not in a project.
+# Tools and project tasks go in `mise.toml`.
+# No [tools] here: tools in this file get a second lockfile, and
+# `mise upgrade --bump` rewrites it.
+
+# The one mise pin: CI installs exactly this release, and an older local mise stops
+# with upgrade instructions. Bump it by hand, to a release that Homebrew ships.
+min_version = "2026.11.6"
+
+[settings]
+lockfile = true
+# Matches the Dependabot cooldown. Exact pins and mise.lock entries are not filtered.
+minimum_release_age = "7d"
+
+[env]
+HK_MISE = 1
+DO_NOT_TRACK = "1"
+# Otherwise terminal managers (such as Orca) kill the background cleanup when a
+# session closes.
+WORKTRUNK_FOREGROUND = 1
+# Each worktree and data dir would download every provider again. Only tofu reads it.
+TF_PLUGIN_CACHE_DIR = "{{ env.HOME }}/.cache/opentofu/plugins"
+
+# mise runs one postinstall hook, and this file's hook wins over `mise.toml`.
+# Add project steps to the `install` task instead.
+[hooks]
+postinstall = '[ -n "${CI:-}" ] || mise run hooks:install'

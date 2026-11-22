@@ -1,0 +1,20 @@
+// Template-owned: edit in cubert, not in a project. Shared steps are in `base.pkl`.
+// This file adds the steps for the features that the project enabled in Copier.
+amends "base.pkl"
+import "package://github.com/jdx/hk/releases/download/v2.11.1/hk@2.11.1#/Builtins.pkl" as builtins
+steps {
+  // The check scripts in .config/ are tested in cubert, so project lint rules skip them.
+  ["python-debug-statements"] = builtins.python_debug_statements
+  ["ruff"] = (builtins.ruff) {
+    exclude = List(".config/**")
+  }
+  ["ruff-format"] = (builtins.ruff_format) {
+    exclude = List(".config/**")
+    depends = "ruff"
+  }
+  ["mypy"] = new Step {
+    glob = List("**/*.py", "**/*.pyi")
+    exclude = List(".config/**")
+    check = ".config/hk/checks/check_mypy.py {{files}}"
+  }
+}

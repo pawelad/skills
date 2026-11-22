@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+#MISE description="Update the files that the cubert template owns, then stop on conflicts"
+#USAGE flag "--vcs-ref <ref>" help="Template Git ref (default: the latest tag)"
+#USAGE flag "-d --data <answer>" var=#true help="Change an answer, such as -d secrets_provider=age"
+set -euo pipefail
+
+# Copier rewrites this file while it runs, and bash reads a script as it goes. Bash
+# parses a `{ }` group to its end before it runs it, so the old text runs on to `exit`.
+main() {
+  if [ -n "$(git status --porcelain)" ]; then
+    echo "template:update: commit or stash your changes first, so the update diff stays separate." >&2
+    exit 1
+  fi
+
+  local args=(update --defaults --conflict inline)
+  if [ -n "${usage_vcs_ref:-}" ]; then
+    args+=(--vcs-ref "$usage_vcs_ref")
+  fi
+  # mise passes a repeated flag as one string of single-quoted words: 'a=1' 'b=2'.
+  local data=() answer
+  eval "data=(${usage_data:-})"
+  for answer in ${data[@]+"${data[@]}"}; do
+    args+=(--data "$answer")
+  done
+  # Copier commits in temporary repos. Global hk hooks would run there and drop mise.lock.
+  # Its "Make sure Git >= 2.24" warning is harmless on Git 2.55+ (copier-org/copier#2759).
+  HK=0 copier "${args[@]}"
+
+  # Copier documents no exit code for conflicts, so look for the markers it writes.
+  local conflicts rejects
+  conflicts="$(git grep --untracked -lE '^(<<<<<<<|>>>>>>>)( |$)' || true)"
+  # Without --exclude-standard: .gitignore ignores *.rej.
+  rejects="$(git ls-files --others -- '*.rej')"
+  if [ -n "$conflicts$rejects" ]; then
+    echo "template:update: resolve these conflicts, then commit:" >&2
+    printf '%s\n%s\n' "$conflicts" "$rejects" | sed '/^$/d; s/^/  /' >&2
+    exit 1
+  fi
+  git status --short
+  # The update can change the tools, the hk config and the post-checkout hook.
+  echo "template:update: done. Run mise run setup and mise run check, then commit the update."
+}
+
+{
+  main "$@"
+  exit
+}

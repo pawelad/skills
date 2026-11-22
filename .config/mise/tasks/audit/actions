@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+#MISE description="Run zizmor's online audits on workflows and actions, such as known vulnerabilities (needs the network)"
+set -euo pipefail
+
+# The same inputs as the zizmor hk step. Nested .github dirs count, such as cubert's template/.
+files=()
+while IFS= read -r file; do
+  files+=("$file")
+done < <(git ls-files --cached --others --exclude-standard \
+  | grep -E '(^|/)\.github/(workflows/[^/]+\.ya?ml|dependabot\.yml)$|(^|/)action\.ya?ml$' || true)
+if [ "${#files[@]}" -eq 0 ]; then
+  echo "audit:actions: no workflows or actions, so nothing to audit."
+  exit 0
+fi
+
+# Without a token, zizmor silently drops to offline mode, which the zizmor hk step already covers.
+if [ -z "${GITHUB_TOKEN:-}" ] && command -v gh >/dev/null && token="$(gh auth token 2>/dev/null)"; then
+  export GITHUB_TOKEN="$token"
+fi
+if [ -z "${GITHUB_TOKEN:-}" ]; then
+  echo "audit:actions: zizmor needs a GitHub token for its online audits. Fix: gh auth login" >&2
+  exit 1
+fi
+zizmor --no-progress "${files[@]}"

@@ -1,0 +1,2 @@
+# Commits that only reformat code. `git blame` and GitHub skip them.
+# `mise run setup` sets blame.ignoreRevsFile for local blame.

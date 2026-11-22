@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Print the changelog entries that HEAD adds since the last release tag"
+set -euo pipefail
+
+# git-cliff logs its config path at info level. Warnings and errors still print.
+RUST_LOG=warn git-cliff --unreleased --strip header

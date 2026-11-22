@@ -1,0 +1,24 @@
+# Template-owned. The tools that the shared hk steps and tasks call, one per line.
+# `name>=version` sets a minimum, and `name@lts` adds a missing tool from that channel.
+# The required-tools hk step fails when mise.toml does not configure a tool, or
+# configures one below its minimum. hk needs a minimum: an older hk cannot load the
+# shared config.
+# `[python=3.14]` selects a private runtime; setup repairs a missing selector.
+betterleaks
+dprint
+hk>=2.11.1
+jactionlint
+jq
+lychee
+osv-scanner
+pkl
+shellcheck
+shfmt
+typos
+uv
+worktrunk
+yamllint[python=3.14]
+zizmor
+pypi:copier[python=3.14]
+ruff
+git-cliff

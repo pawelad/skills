@@ -1,0 +1,6 @@
+// Project-owned. Shared steps: .config/hk/cubert.pkl and base.pkl (template-owned).
+// Change a shared step: `["dprint"] { exclude = List("generated/**") }`.
+// Turn one off: `skip_steps = List("file-length")`.
+// Add one: `["name"] = new Step { glob = List("*.x"); check = "tool {{files}}" }`.
+// Import Builtins.pkl `as hkb`: a second import named `Builtins` breaks hk's evaluator.
+amends ".config/hk/cubert.pkl"

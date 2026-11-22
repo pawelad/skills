@@ -1,0 +1,25 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+trim_trailing_whitespace = true
+insert_final_newline = true
+max_line_length = 88
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.py]
+indent_size = 4
+
+# shfmt reads these keys.
+[[shell]]
+binary_next_line = true
+switch_case_indent = true
+
+[{Makefile,*.go,.gitmodules}]
+indent_style = tab
+indent_size = 4

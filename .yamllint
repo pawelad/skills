@@ -1,0 +1,5 @@
+---
+# Project rules. The shared rules belong to the template.
+extends: ".config/yamllint.yaml"
+
+# An `ignore` list here replaces the shared one, so copy the shared entries into it.

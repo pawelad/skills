@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#MISE description="Install project dependencies, then check and test. A project can replace it"
+set -euo pipefail
+
+# A stale uv.lock must fail CI. Locally, `uv sync` still updates it after an edit.
+export UV_LOCKED=1
+mise run install
+mise run check
+mise run test

@@ -1,0 +1,44 @@
+---
+extends: "default"
+
+ignore: |
+  .venv/
+  .mise/
+  tmp/
+  .copier-answers.yml
+  .openspec.yaml
+  openspec/schemas/
+
+rules:
+  # A SHA pin with its trailing version comment, which Dependabot and zizmor read,
+  # cannot fit 88 columns. jactionlint checks these files instead.
+  line-length:
+    max: 88
+    ignore: |
+      **/.github/workflows/
+      **/action.yml
+      **/action.yaml
+
+  # Quoting every string also catches unquoted Ansible `name` and `notify` values.
+  quoted-strings:
+    required: true
+    quote-type: "double"
+    check-keys: false
+
+  truthy:
+    level: "error"
+    check-keys: false
+
+  comments:
+    min-spaces-from-content: 1
+
+  # ansible-lint expects `{{ var }}` with inner spaces.
+  braces:
+    max-spaces-inside: 1
+
+  brackets:
+    max-spaces-inside: 1
+
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true

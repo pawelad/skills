@@ -1,0 +1,2 @@
+# Paths that `mise run worktree:setup` links from the primary checkout, one per line.
+# Use it for operator credentials that are the same on every branch.

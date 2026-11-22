@@ -1,0 +1,24 @@
+---
+# Project-owned: the triggers are yours. cubert-audit.yml holds the shared job.
+# A separate workflow, so the weekly run does not start the CI jobs.
+name: "Audit"
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+  # New advisories appear without a commit, so audit once a week.
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: "read"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    uses: "$/.github/workflows/cubert-audit.yml"

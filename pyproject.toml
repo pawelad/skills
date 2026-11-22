@@ -1,0 +1,85 @@
+[project]
+name = "skills"
+version = "0.1.0"
+# Escaped, so a quote or backslash in the answer keeps the TOML valid.
+description = "Agent Skills for Pi, Codex, Claude Code and Antigravity."
+requires-python = ">=3.14"
+dependencies = []
+
+[dependency-groups]
+# uv.lock pins them, so cubert holds no versions.
+dev = ["mypy", "pytest", "pytest-xdist"]
+
+[tool.uv]
+# Matches the Dependabot cooldown. Installs from uv.lock are not filtered.
+exclude-newer = "7 days"
+
+# An explicit list, so a ruff upgrade adds no rules on its own.
+[tool.ruff.lint]
+select = [
+  "A", # flake8-builtins
+  "ANN", # flake8-annotations
+  "ARG", # flake8-unused-arguments
+  "ASYNC", # flake8-async
+  "B", # flake8-bugbear
+  "BLE", # flake8-blind-except
+  "C4", # flake8-comprehensions
+  "C90", # mccabe
+  "D", # pydocstyle
+  "DTZ", # flake8-datetimez
+  "E", # pycodestyle
+  "ERA", # eradicate
+  "F", # pyflakes
+  "FA", # flake8-future-annotations
+  "FURB", # refurb
+  "G", # flake8-logging-format
+  "I", # isort
+  "ISC", # flake8-implicit-str-concat
+  "LOG", # flake8-logging
+  "N", # pep8-naming
+  "PERF", # perflint
+  "PIE", # flake8-pie
+  "PL", # pylint
+  "PT", # flake8-pytest-style
+  "PTH", # flake8-use-pathlib
+  "Q", # flake8-quotes
+  "RET", # flake8-return
+  "RUF", # ruff-specific
+  "S", # flake8-bandit
+  "SIM", # flake8-simplify
+  "T20", # flake8-print
+  "TID", # flake8-tidy-imports
+  "TRY", # tryceratops
+  "UP", # pyupgrade
+]
+ignore = [
+  "D104", # Missing docstring in public package
+  "D106", # Missing docstring in public nested class
+  "PERF401", # List comprehension instead of loop
+  "TRY003", # Avoid specifying long messages outside the exception class
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+  "D1", # Missing docstring: a test name states the behavior it asserts
+  "PLR2004", # Magic value used in comparison
+  "S101", # Use of `assert` detected
+]
+# Scripts are CLIs, and their output goes to stdout. `**/` also covers nested
+# `scripts/` dirs, such as an Agent Skill's `skills/<category>/<name>/scripts/`.
+"**/scripts/**/*.py" = [
+  "T20", # flake8-print
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+strict = true
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests"]
+# importlib mode lets test files share a name across directories without __init__.py.
+addopts = "--import-mode=importlib"
+pythonpath = ["."]

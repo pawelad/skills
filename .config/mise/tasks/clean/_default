@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="Remove build output and caches: every clean:<area> task, clean:worktree among them"
+#MISE depends=["clean:*"]
+set -euo pipefail

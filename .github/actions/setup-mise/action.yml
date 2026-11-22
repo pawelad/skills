@@ -1,0 +1,94 @@
+---
+# Template-owned: edit in cubert, not in a project.
+name: "Setup mise"
+description: "Install a pinned mise and let it export the repo's tool versions"
+
+inputs:
+  tools:
+    description: >-
+      Space-separated tools the job's tasks actually call, e.g. "uv" or
+      "bun biome". Empty installs everything; "none" installs nothing, for jobs
+      that only need mise's exported env vars.
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    # The tool list goes in the key, so jobs with different tools keep separate caches.
+    - name: "Read the mise pin and compute the cache key"
+      id: "key"
+      shell: "bash"
+      env:
+        TOOLS: "${{ inputs.tools || 'all' }}"
+        CONFIG_HASH: "${{ hashFiles('mise.toml', 'mise.lock') }}"
+      run: |
+        # `min_version` in the shared config is the one mise pin, for CI and for every machine.
+        VERSION="$(sed -n 's/^min_version = "\(.*\)"$/\1/p' .config/mise/config.toml)"
+        if [ -z "${VERSION}" ]; then
+          echo "::error::.config/mise/config.toml sets no min_version"
+          exit 1
+        fi
+        echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+        prefix="mise-${RUNNER_OS}-${VERSION}-${TOOLS// /_}"
+        {
+          echo "prefix=${prefix}"
+          echo "key=${prefix}-${CONFIG_HASH}"
+        } >> "${GITHUB_OUTPUT}"
+
+    # Not mise-action's cache: it saves only after its own install, which cannot retry.
+    - name: "Restore mise tools"
+      id: "cache"
+      if: "inputs.tools != 'none'"
+      uses: "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9" # v6.1.0
+      with:
+        path: "~/.local/share/mise"
+        key: "${{ steps.key.outputs.key }}"
+        restore-keys: "${{ steps.key.outputs.prefix }}-"
+
+    - name: "Install mise"
+      uses: "jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518" # v4.2.5
+      with:
+        version: "${{ steps.key.outputs.version }}"
+        install: "false"
+        cache: "false"
+
+    # Parallel installs can leave a new binary busy (ETXTBSY) for another install.
+    - name: "Install pinned tools"
+      shell: "bash"
+      env:
+        TOOLS: "${{ inputs.tools }}"
+      run: |
+        if [ "${TOOLS}" = "none" ]; then
+          echo "No tools requested; mise's env vars are already exported."
+          exit 0
+        fi
+        # Unquoted on purpose: the input is a list of tool names, or empty.
+        # shellcheck disable=SC2086
+        for attempt in 1 2 3; do
+          if mise install --locked ${TOOLS}; then
+            exit 0
+          fi
+          echo "::warning::mise install failed (attempt ${attempt}/3), retrying"
+          sleep 5
+        done
+        exit 1
+
+    # Otherwise `mise run` installs every tool in mise.toml before each task.
+    - name: "Limit tasks to the requested tools"
+      if: "inputs.tools != ''"
+      shell: "bash"
+      run: "echo 'MISE_TASK_RUN_AUTO_INSTALL=false' >> \"${GITHUB_ENV}\""
+
+    # Otherwise a partial restore saves old versions beside the new ones.
+    - name: "Prune tool versions no config asks for"
+      if: "inputs.tools != 'none' && steps.cache.outputs.cache-hit != 'true'"
+      shell: "bash"
+      run: "mise prune --tools"
+
+    - name: "Save mise tools"
+      if: "inputs.tools != 'none' && steps.cache.outputs.cache-hit != 'true'"
+      uses: "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9" # v6.1.0
+      with:
+        path: "~/.local/share/mise"
+        key: "${{ steps.key.outputs.key }}"

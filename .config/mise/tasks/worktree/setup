@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+#MISE description="Set up a new worktree once: link shared paths, copy ignored files, install"
+#MISE alias="wt:setup"
+#USAGE flag "--force" help="Run again in a worktree that is already set up"
+set -euo pipefail
+
+git_dir="$(cd "$(git rev-parse --git-dir)" && pwd -P)"
+common_dir="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)"
+if [ "$git_dir" = "$common_dir" ]; then
+  echo "worktree:setup: this is the primary checkout, nothing to do."
+  exit 0
+fi
+
+# The marker, not the post-checkout all-zero ref, makes this run once: Orca pre-warms
+# detached worktrees and finalizes them later with a plain checkout.
+marker="$git_dir/cubert-worktree-setup-done"
+if [ -f "$marker" ] && [ "${usage_force:-false}" != "true" ]; then
+  exit 0
+fi
+
+primary="$(git worktree list --porcelain | sed -n '1s/^worktree //p')"
+
+# A real directory blocks its link, because `ln -sfn` would put the link inside it.
+link() {
+  local path="$1"
+  [ -e "$primary/$path" ] || return 0
+  if [ -e "$path" ] && [ ! -L "$path" ]; then
+    echo "worktree:setup: skip $path, a real file or dir. Move it to $primary/$path, then run with --force." >&2
+    return 0
+  fi
+  mkdir -p "$(dirname "$path")"
+  ln -sfn "$primary/$path" "$path"
+}
+
+# Agent output (reports, critiques) then outlives the worktree.
+for dir in tmp .agent .agents .claude .codex .gemini .opencode .pi .impeccable; do
+  link "$dir"
+done
+
+# Operator credentials are the same for every branch, and copies drift.
+if [ -f .worktreelinks ]; then
+  while IFS= read -r path || [ -n "$path" ]; do
+    case "$path" in "" | "#"*) continue ;; esac
+    link "$path"
+  done <.worktreelinks
+fi
+
+# After links: an unanchored .env in .worktreeinclude also matches <opentofu_dir>/.env.
+wt step copy-ignored --require-include
+
+mise run install
+touch "$marker"

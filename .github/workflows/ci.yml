@@ -1,0 +1,23 @@
+---
+# Project-owned: the triggers and project jobs are yours. cubert-check.yml holds the
+# shared job, and a template update changes only that file.
+name: "CI"
+
+on:
+  push:
+    branches: ["main"]
+    # A release commit only adds the CHANGELOG.md section, and its parent passed CI.
+    paths-ignore: ["CHANGELOG.md"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: "read"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  check:
+    uses: "$/.github/workflows/cubert-check.yml"

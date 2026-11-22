@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+#MISE description="Set up a checkout: pin and install tools, git hooks, blame config, then install"
+set -euo pipefail
+
+# `mise use --pin tool@latest` can pick an installed release that minimum_release_age
+# hides, then fail to lock it for other platforms. `mise latest` applies the cutoff.
+pin() {
+  local request tool version resolved requests=()
+  for request in "$@"; do
+    tool="$request" version=""
+    # The text after the last @ is a version unless it holds a /, as in npm:@scope/name.
+    case "${request##*@}" in
+      "$request" | */*) ;;
+      *) tool="${request%@*}" version="${request##*@}" ;;
+    esac
+    case "$version" in
+      "" | latest | lts)
+        resolved="$(mise latest "$tool${version:+@$version}")"
+        if [ -z "$resolved" ]; then
+          echo "setup: mise latest found no release of $tool" >&2
+          return 1
+        fi
+        requests+=("$tool@$resolved")
+        ;;
+      *) requests+=("$request") ;;
+    esac
+  done
+  echo "setup: pinning ${requests[*]}"
+  mise use --path mise.toml --pin "${requests[@]}"
+}
+
+# The check scripts below run on uv, so an adopted mise.toml without uv needs it first.
+if ! mise config get --file mise.toml tools.uv >/dev/null 2>&1; then
+  echo "setup: adding uv, which the setup checks run on"
+  pin uv
+fi
+
+# A new project's mise.toml seeds `latest`.
+unpinned="$(.config/hk/checks/check_required_tools.py --unpinned)"
+if [ -n "$unpinned" ]; then
+  # shellcheck disable=SC2086
+  pin $unpinned
+fi
+
+# A template update can add a required tool, but cannot add it to mise.toml.
+missing="$(.config/hk/checks/check_required_tools.py --names)"
+if [ -n "$missing" ]; then
+  echo "setup: adding required tools $(echo "$missing" | tr '\n' ' ')"
+  # shellcheck disable=SC2086
+  pin $missing
+fi
+
+mise install
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+if [ -z "${CI:-}" ]; then
+  mise run hooks:install
+fi
+mise run install

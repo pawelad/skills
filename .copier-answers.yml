@@ -1,0 +1,15 @@
+# Written by Copier. Do not edit: `mise run template:update` reads it.
+_commit: v0.1.0
+_src_path: gh:pawelad/cubert
+ansible: false
+changelog: true
+description: Agent Skills for Pi, Codex, Claude Code and Antigravity.
+docker: false
+github_owner: pawelad
+license: MPL-2.0
+openspec: none
+opentofu: false
+project_name: skills
+python: true
+typescript: false
+

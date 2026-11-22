@@ -1,0 +1,8 @@
+# Template-owned. A project adds words in a root `typos.toml`, which layers on this file.
+[default]
+extend-ignore-re = [
+  # A line that ends in this comment is not checked.
+  "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$",
+  # Commit hashes, such as git-cliff's changelog links: `2c410ba` reads as `ba`.
+  "\\b[0-9a-f]{7,40}\\b",
+]

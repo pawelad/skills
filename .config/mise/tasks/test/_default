@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#MISE description="Run every test suite: each project test:<area> task"
+set -euo pipefail
+
+# mise passes extra args here, and `mise run 'test:*'` would drop them without a word.
+if [ "$#" -gt 0 ]; then
+  echo "test: runs every suite and takes no arguments. Run files with mise run test:<area> <file>." >&2
+  exit 2
+fi
+
+# Not `depends=["test:*"]`: mise fails that pattern when no task matches it.
+if ! mise tasks ls --no-header | awk '{ print $1 }' | grep -q '^test:'; then
+  echo "test: no test:<area> tasks yet. Add one to mise.toml."
+  exit 0
+fi
+mise run 'test:*'

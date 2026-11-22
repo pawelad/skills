@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#MISE description="Empty the worktrunk trash directory to free disk space"
+set -euo pipefail
+
+trash="$(git rev-parse --git-common-dir)/wt/trash"
+shopt -s nullglob
+entries=("$trash"/*)
+if [ "${#entries[@]}" -eq 0 ]; then
+  echo "Trash is empty."
+  exit 0
+fi
+total="$(du -sh "$trash" | awk '{print $1}')"
+echo "Removing ${#entries[@]} worktree(s), ${total} total"
+for entry in "${entries[@]}"; do
+  echo "  $(basename "$entry") ($(du -sh "$entry" | awk '{print $1}'))"
+  chmod -R u+w "$entry" 2>/dev/null || true
+  rm -rf "$entry"
+done
+echo "Freed ${total}."

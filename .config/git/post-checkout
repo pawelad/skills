@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Template-owned. `mise run hooks:install` copies it to the git hooks dir.
+# Agent tools (Superset, Jean, herdr, Orca) create worktrees with plain git, which fires this hook.
+set -euo pipefail
+
+git_dir="$(git rev-parse --git-dir)"
+if [ "$git_dir" = "$(git rev-parse --git-common-dir)" ]; then
+  exit 0
+fi
+# Checked again in worktree:setup. This copy only saves a mise start on each checkout.
+if [ -f "$git_dir/cubert-worktree-setup-done" ]; then
+  exit 0
+fi
+
+# GUI apps start hooks with a minimal launchd PATH that lacks mise.
+for p in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin; do
+  if [ -d "$p" ] && [[ ":$PATH:" != *":$p:"* ]]; then
+    PATH="$p:$PATH"
+  fi
+done
+export PATH
+export MISE_YES=1
+
+if ! command -v mise >/dev/null 2>&1; then
+  echo "post-checkout: mise not found, skipping worktree setup" >&2
+  exit 0
+fi
+
+mise run worktree:setup

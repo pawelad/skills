@@ -1,0 +1,4 @@
+---
+# Template-owned: edit in cubert, not in a project.
+# Every audit runs. A rule goes here only with the reason it is off.
+rules: {}

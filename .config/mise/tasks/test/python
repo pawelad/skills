@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#MISE description="Run the Python tests"
+#USAGE arg "[files]..." help="Test files to run"
+set -euo pipefail
+
+# A project that predates pytest in the template has no pytest in its project-owned
+# pyproject.toml, so the update must not break its `test` run.
+if ! uv run python -c 'import pytest' 2>/dev/null; then
+  echo "test:python: pytest is not installed. Run: uv add --dev pytest"
+  exit 0
+fi
+
+# A full run spreads over every core. A few named files run faster in one process.
+parallel=()
+if [ -z "${usage_files:-}" ] && uv run python -c 'import xdist' 2>/dev/null; then
+  parallel=(-n auto)
+fi
+
+# mise passes usage args only as usage_* variables, and the list must split into words.
+# pytest exits 5 when it collects no tests. A fresh project has none, so that passes.
+status=0
+# bash 3.2 (macOS) treats an empty array as unset under `set -u`.
+# shellcheck disable=SC2086
+uv run pytest ${parallel[@]+"${parallel[@]}"} ${usage_files:-} || status=$?
+if [ "$status" -eq 5 ]; then
+  echo "test:python: no tests collected."
+  exit 0
+fi
+exit "$status"

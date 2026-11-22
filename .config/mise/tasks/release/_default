@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+#MISE description="Release a version: bump, changelog, commit and tag, then push and publish after you confirm"
+#MISE raw=true
+#USAGE arg "<version>" help="Version to release, such as 1.2.0 or v1.2.0"
+#USAGE flag "--no-push" help="Prepare the commit and tag only, with no CI check, push or GitHub Release"
+set -euo pipefail
+
+fail() {
+  echo "release: $*" >&2
+  exit 1
+}
+
+version="${usage_version:-}"
+version="${version#v}"
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "use a version such as 1.2.0, not ${usage_version:-}"
+tag="v${version}"
+push=true
+if [ "${usage_no_push:-false}" = true ]; then push=false; fi
+
+git fetch --quiet origin main --tags
+[ "$(git branch --show-current)" = main ] || fail "release from main only"
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || fail "HEAD must equal origin/main. Push or pull first."
+[ -z "$(git status --porcelain)" ] || fail "commit or stash your changes first"
+if git rev-parse --quiet --verify "refs/tags/${tag}" >/dev/null; then fail "${tag} already exists"; fi
+latest="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)"
+if [ -n "$latest" ] && [ "$(printf '%s\n%s\n' "$latest" "$tag" | sort -V | tail -n 1)" != "$tag" ]; then
+  fail "${tag} is not newer than ${latest}"
+fi
+
+# Optional project hooks: release:bump <version>, and release:publish <tag> in place of
+# the GitHub Release, such as for a project whose tag workflow publishes.
+tasks="$(mise tasks ls --no-header | awk '{ print $1 }')"
+has_task() { grep -qx "$1" <<<"$tasks"; }
+# Unset, the parent's usage_* would reach a hook that forgot its own `arg`.
+run_hook() { env -u usage_version -u usage_no_push mise run "$@"; }
+if has_task release:publish; then
+  publish="mise run release:publish ${tag}"
+else
+  publish="gh release create ${tag} --verify-tag --notes-from-tag"
+fi
+
+# A tag reaches every project that updates, so the commit under it must have passed CI.
+if [ "$push" = true ]; then
+  ci="$(gh run list --commit "$(git rev-parse HEAD)" --event push --json status,conclusion --jq '
+    if length == 0 then "missing"
+    elif any(.[]; .status != "completed") then "running"
+    elif all(.[]; .conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral") then "passed"
+    else "failed" end')" || fail "gh could not list CI runs. Run gh auth login, or pass --no-push."
+  [ "$ci" = passed ] || fail "CI on HEAD is ${ci}. Release after it passes."
+fi
+
+if has_task release:bump; then
+  run_hook release:bump "$version" || fail "release:bump failed. Revert its edits with: git restore ."
+  # The release commit takes tracked files only, and a leftover file blocks the push check.
+  untracked="$(git ls-files --others --exclude-standard)"
+  [ -z "$untracked" ] || fail "release:bump created untracked files. Track them, revert with git restore ., then retry:"$'\n'"${untracked}"
+fi
+
+if [ -n "$latest" ]; then
+  RUST_LOG=warn git-cliff --tag "$tag" --unreleased --prepend CHANGELOG.md
+else
+  # Nobody had an earlier version, and the history before it is mostly scaffolding.
+  section="## [${version}] - $(date -u +%Y-%m-%d)"
+  awk -v section="$section" '
+    /^## / && !done { print section "\n\nInitial release.\n"; done = 1 }
+    { print }
+    END { if (!done) print "\n" section "\n\nInitial release." }
+  ' CHANGELOG.md >CHANGELOG.md.new
+  mv CHANGELOG.md.new CHANGELOG.md
+fi
+notes="$(awk -v heading="## [${version}]" '
+  /^## / { if (found) exit; if (index($0, heading) == 1) found = 1; next }
+  found { print }
+' CHANGELOG.md | sed -e '/./,$!d')"
+[ -n "${notes//[[:space:]]/}" ] || fail "git-cliff wrote no CHANGELOG.md section for ${version}"
+
+# One commit, so the version files and the changelog never drift apart.
+git add --update
+git commit --quiet -m "chore(release): ${tag}"
+# Verbatim: the notes start with `### Features`, which the default cleanup strips.
+printf '%s\n' "$notes" | git tag --annotate --cleanup=verbatim --file=- "$tag"
+git --no-pager show --stat "$tag"
+
+pushed="git push --atomic origin main ${tag} && ${publish}"
+if [ "$push" = false ]; then
+  echo "release: ${tag} is ready locally. Publish it with: ${pushed}"
+  exit 0
+fi
+answer=""
+if [ -t 0 ]; then read -r -p "Push main and ${tag}, then run: ${publish}? [y/N] " answer; fi
+case "$answer" in
+  [yY] | [yY][eE][sS]) ;;
+  *)
+    echo "release: ${tag} stays local. Publish it with: ${pushed}"
+    exit 0
+    ;;
+esac
+
+# Another session can move main while you review the release.
+[ "$(git branch --show-current)" = main ] && [ "$(git rev-parse HEAD)" = "$(git rev-parse "${tag}^{commit}")" ] \
+  && [ -z "$(git status --porcelain)" ] || fail "the checkout changed during review. Check it, then: ${pushed}"
+git push --atomic origin main "$tag"
+if has_task release:publish; then
+  run_hook release:publish "$tag" || fail "pushed ${tag}, but release:publish failed. Retry: ${publish}"
+else
+  gh release create "$tag" --verify-tag --notes-from-tag || fail "pushed ${tag}, but the GitHub Release failed. Retry: ${publish}"
+fi

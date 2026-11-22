@@ -1,0 +1,89 @@
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project are documented here.
+[git-cliff](https://git-cliff.org) generates them from the Conventional Commits history.
+Do not edit past entries by hand.
+"""
+# `areas` lists the changelog scopes in display order. With areas, each group lists its
+# entries by area, and `.config/hk/checks/check_commit_scope.py` requires an area scope.
+# A squash merge ends its subject with `(#N)`. The entry links that PR, or the commit.
+body = """
+{% macro entry(commit, repo) %}\
+    {% if commit.links | length > 0 %}\
+        {% set pr = commit.links | first %}\
+        {{ commit.message | trim_end_matches(pat=" (" ~ pr.text ~ ")") | upper_first }} \
+            ([{{ pr.text }}]({{ pr.href }}))\
+    {% else %}\
+        {{ commit.message | upper_first }} \
+            ([{{ commit.id | truncate(length=7, end="") }}]({{ repo }}/commit/{{ commit.id }}))\
+    {% endif %}\
+{% endmacro %}\
+{% set repo = "https://github.com/pawelad/skills" %}\
+{% set areas = [] %}\
+{% if version %}\
+    ## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+    ## [Unreleased]
+{% endif %}\
+{% if commits | length == 0 %}
+    No user-facing changes.
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+    ### {{ group | striptags | trim | upper_first }}
+    {% for area in areas %}\
+        {% set area_commits = commits | filter(attribute="scope", value=area) %}\
+        {% if area_commits | length > 0 %}
+            #### {{ area | upper_first }}
+            {% for commit in area_commits %}
+                - {{ self::entry(commit=commit, repo=repo) }}\
+            {% endfor %}
+        {% endif %}\
+    {% endfor %}\
+    {% set_global other = [] %}\
+    {% for commit in commits %}\
+        {% if not commit.scope or commit.scope not in areas %}{% set_global other = other | concat(with=commit) %}{% endif %}\
+    {% endfor %}\
+    {% if other | length > 0 %}
+        {% if areas | length > 0 %}#### Other{% endif %}
+        {% for commit in other %}
+            - {% if commit.scope %}_({{ commit.scope }})_ {% endif %}\
+                {{ self::entry(commit=commit, repo=repo) }}\
+        {% endfor %}
+    {% endif %}\
+{% endfor %}\n
+"""
+trim = true
+footer = ""
+# dprint wraps Markdown at 88 columns. Formatting here keeps every output in that form.
+postprocessors = [
+  { pattern = ".*", replace_command = "dprint fmt --stdin CHANGELOG.md" },
+]
+# A release with only skipped commits still needs a section for its GitHub Release.
+render_always = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+tag_pattern = "v[0-9]*"
+# Only the subject: a squash body lists the PR's commits, which can name other PRs.
+link_parsers = [
+  { pattern = "^[^\\n]* \\(#(\\d+)\\)(\\n|$)", href = "https://github.com/pawelad/skills/pull/$1", text = "#$1" },
+]
+sort_commits = "oldest"
+
+# The changelog lists what shipped. The HTML comments set the group order.
+commit_parsers = [
+  { message = "^chore\\(release\\)", skip = true },
+  { field = "breaking", pattern = "true", group = "<!-- 0 -->Breaking Changes" },
+  { message = "^(feat|fix|perf)\\((agents|checks|ci|deps|hk|mise|openspec|release|setup|template|tests?|tooling|worktrees)\\)", skip = true },
+  { message = "^feat", group = "<!-- 1 -->Features" },
+  { message = "^fix", group = "<!-- 2 -->Bug Fixes" },
+  { message = "^perf", group = "<!-- 3 -->Performance" },
+  { message = "^revert", group = "<!-- 4 -->Reverts" },
+  { message = ".*", skip = true },
+]

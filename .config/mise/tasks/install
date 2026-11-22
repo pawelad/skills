@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Install project dependencies (replace this task in mise.toml)"
+set -euo pipefail
+
+echo "install: no project dependencies. Define [tasks.install] in mise.toml to add them."

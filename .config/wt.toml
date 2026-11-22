@@ -1,0 +1,19 @@
+# Merged: add project lines below the shared ones, so updates merge cleanly. Add hook
+# keys inside a shared table: a second [pre-start] or [post-start] header breaks TOML.
+# Put setup steps in .worktreeinclude, .worktreelinks or the `install` task instead.
+
+[pre-start]
+setup = "mise run worktree:setup"
+
+# `wt merge` and `wt step squash` pass this to the LLM that writes the commit message.
+[commit.generation]
+template-append = """
+- Write a Conventional Commit subject: `<type>(<scope>): <description>`.
+- Use a kebab-case scope.
+- Types: feat fix docs style refactor perf test build ci chore revert.
+- A feat, fix or perf subject describes the change that a user sees.
+- Use active voice, one idea per sentence, and American English.
+- No em dashes, no emojis, no Co-Authored-By trailers.
+"""
+# Worktrunk reads commit guidance from this file only. Add project rules, such as the
+# changelog areas to scope with, at the end of template-append.

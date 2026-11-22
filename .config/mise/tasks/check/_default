@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="Run every check: shared hk steps, repo guards and each project check:<area> task"
+#MISE depends=["check:*"]
+set -euo pipefail
