@@ -1,0 +1,8 @@
+# Copy to $FINANCE_DIR/config.local.toml and set your own Wealthfolio account names.
+# Keep the copy outside the repository: account names are personal.
+
+[trade_republic.accounts]
+# Trade Republic `account_type` = Wealthfolio account name, as Wealthfolio shows it.
+# A row of an account type missing here is listed as unmapped.
+DEFAULT = "Trade Republic"
+# JUNIOR = "Trade Republic Junior"

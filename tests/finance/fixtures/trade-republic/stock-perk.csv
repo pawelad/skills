@@ -1,0 +1,6 @@
+"datetime","date","account_type","category","type","asset_class","name","symbol","shares","price","amount","fee","tax","currency","original_amount","original_currency","fx_rate","description","transaction_id","counterparty_name","counterparty_iban","payment_reference","mcc_code"
+"2026-11-02T09:00:00.000Z","2026-11-02","DEFAULT","CASH","CUSTOMER_INPAYMENT","","","","","","1000.00","","","PLN","","","","Example top-up","00000000-0000-4000-8000-000000000201","Example Person","","",""
+"2026-11-03T10:00:00.000Z","2026-11-03","DEFAULT","TRADING","BUY","STOCK","Example Corp","US00EXAMPLE2","2.0000000000","150.000000","-300.00","-1.00","","PLN","","","","Example buy","00000000-0000-4000-8000-000000000202","","","",""
+"2026-11-04T08:00:00.000Z","2026-11-04","DEFAULT","CASH","STOCKPERK","STOCK","Example Shoes","US00EXAMPLE3","","","40.00","","","PLN","","","","Example perk","00000000-0000-4000-8000-000000000203","","","",""
+"2026-11-04T08:00:05.000Z","2026-11-04","DEFAULT","TRADING","BUY","STOCK","Example Shoes","US00EXAMPLE3","0.1234567000","324.000000","-40.00","","","PLN","","","","Example perk buy","00000000-0000-4000-8000-000000000204","","","",""
+"2026-11-05T08:00:00.000Z","2026-11-05","DEFAULT","CASH","STOCKPERK","STOCK","Example Toys","US00EXAMPLE4","","","25.00","","","PLN","","","","Example perk","00000000-0000-4000-8000-000000000205","","","",""

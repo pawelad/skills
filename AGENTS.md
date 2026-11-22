@@ -14,6 +14,10 @@ This file holds the rules that no tool checks. Rationale lives in `docs/`.
 - Files in `.config/`, except `wt.toml`, belong to the cubert template. Change them in
   cubert, then run `mise run template:update`.
 - Reports: `tmp/reports/YYYY-MM-DD-<topic>.md`. Scratch work: `tmp/<task>/`.
+- Skills: `skills/<category>/<name>/`, with `SKILL.md` and `scripts/`. Tests:
+  `tests/<category>/`.
+- Finance skills: [skills/finance/AGENTS.md](./skills/finance/AGENTS.md). Read it before
+  you touch `skills/finance/` or `tests/finance/`.
 
 <!-- cubert:shared:start: edit in cubert, not here -->
 
@@ -116,10 +120,21 @@ This file holds the rules that no tool checks. Rationale lives in `docs/`.
 
 ## Project
 
+### Rules
+
+- A skill is self-contained: an install copies only its directory. Put each rule that
+  must hold at run time in its `SKILL.md`, not only in an `AGENTS.md`.
+- A skill script is a PEP 723 script that `uv run` starts. Use the standard library
+  where it suffices.
+- No harness-specific manifests, such as `.claude-plugin/` or a `pi` key in
+  `package.json`. The `skills/` layout is what the installers discover.
+- Never put a `.md` file directly in `skills/`: Pi loads each one as a skill.
+
 ### Ask First
 
-- None yet.
+- Ask before you add a skill category.
 
 ### Done
 
-- [ ] None yet.
+- [ ] `npx skills add ./skills --list` lists exactly the skills under `skills/`.
+- [ ] The skill's `SKILL.md` frontmatter `name` matches its directory.
