@@ -4,3 +4,11 @@
 // Add one: `["name"] = new Step { glob = List("*.x"); check = "tool {{files}}" }`.
 // Import Builtins.pkl `as hkb`: a second import named `Builtins` breaks hk's evaluator.
 amends ".config/hk/cubert.pkl"
+
+steps {
+  // Fixtures are hand-written; an account or card number means a real export leaked in.
+  ["private-identifiers"] = new Step {
+    glob = List("tests/**")
+    check = "scripts/check_private_identifiers.py {{files}}"
+  }
+}

@@ -14,6 +14,11 @@ dev = ["mypy", "pytest", "pytest-xdist"]
 # Matches the Dependabot cooldown. Installs from uv.lock are not filtered.
 exclude-newer = "7 days"
 
+# Scripts run on the Python their PEP 723 block allows, not the project's 3.14.
+[tool.ruff.per-file-target-version]
+"skills/**/scripts/*.py" = "py312"
+"scripts/*.py" = "py312"
+
 # An explicit list, so a ruff upgrade adds no rules on its own.
 [tool.ruff.lint]
 select = [
