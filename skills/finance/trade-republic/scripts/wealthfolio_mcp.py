@@ -127,7 +127,7 @@ def http_reason(code: int) -> str:
 
 
 def sse_messages(text: str) -> list[str]:
-    """Return the data of each event in a server-sent event stream."""
+    """Return the data of each event in a server-sent event stream that has data."""
     messages = []
     for event in re.split(r"\r?\n\r?\n", text):
         data = [
@@ -135,7 +135,8 @@ def sse_messages(text: str) -> list[str]:
             for line in event.splitlines()
             if line.startswith("data:")
         ]
-        if data:
+        # A priming event carries only an event ID, for resumption, and no message.
+        if any(data):
             messages.append("\n".join(data))
     return messages
 

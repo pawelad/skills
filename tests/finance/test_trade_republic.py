@@ -196,7 +196,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         text = json.dumps(body)
         if fake.sse:
-            text = f"event: message\ndata: {text}\n\n"
+            # Wealthfolio opens each stream with a priming event that has no data.
+            text = f"data: \nid: 0\nretry: 3000\n\nevent: message\ndata: {text}\n\n"
         data = text.encode("utf-8")
         kind = "text/event-stream" if fake.sse else "application/json"
         self.send_header("Content-Type", kind)
