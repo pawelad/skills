@@ -117,7 +117,10 @@ def http_reason(code: int) -> str:
             " expired, or token_command prints another secret."
         )
     if code == 404:  # noqa: PLR2004
-        return "HTTP 404: mcp_url must be the server's /mcp path."
+        return (
+            "HTTP 404: mcp_url must be the server's /mcp path. If calls worked"
+            " earlier in the run, the server dropped the session: rerun."
+        )
     if 300 <= code < 400:  # noqa: PLR2004
         return f"HTTP {code}: mcp_url redirects. Set it to the final URL."
     return f"HTTP {code} from Wealthfolio's MCP server."
