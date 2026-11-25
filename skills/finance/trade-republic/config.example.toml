@@ -1,8 +1,26 @@
-# Copy to $FINANCE_DIR/config.local.toml and set your own Wealthfolio account names.
+# Copy to $FINANCE_DIR/config.local.toml and set your own values.
 # Keep the copy outside the repository: account names are personal.
 
 [trade_republic.accounts]
 # Trade Republic `account_type` = Wealthfolio account name, as Wealthfolio shows it.
-# A row of an account type missing here is listed as unmapped.
+# A row of an account type missing here is listed as unmapped. `import --commit`
+# creates a missing account: Securities, Transactions mode, in its rows' currency.
 DEFAULT = "Trade Republic"
 # JUNIOR = "Trade Republic Junior"
+
+[wealthfolio]
+# The MCP endpoint of your self-hosted Wealthfolio: its address with /mcp.
+mcp_url = "https://wealthfolio.example.com/mcp"
+# A command that prints the MCP token, and nothing else. The script runs it without a
+# shell and never prints the token. This one reads the password of a Proton Pass item.
+token_command = [
+  "pass-cli",
+  "item",
+  "view",
+  "--vault-name",
+  "Finance",
+  "--item-title",
+  "Wealthfolio MCP",
+  "--field",
+  "password",
+]

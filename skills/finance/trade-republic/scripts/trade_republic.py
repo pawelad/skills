@@ -2,11 +2,13 @@
 # /// script
 # requires-python = ">=3.12"
 # ///
-"""Turn a Trade Republic transaction export into a Wealthfolio activity import CSV.
+"""Import a Trade Republic transaction export into Wealthfolio through its MCP server.
 
-`inspect` prints the header and the shape of each column's values. `convert` prints a
-summary, and writes the CSV and the run ledger only with `--write`. Neither command
-prints a row, an amount of a single row, a name, a description or an account number.
+`inspect` prints the header and the shape of each column's values. `import` prints a
+summary and Wealthfolio's preview of the new rows. Only with `--commit` does it create
+the account and the activities, and write the run ledger. `check` tests the connection.
+No command prints a row, an amount of a single row, a name, a description, an account
+number or the token.
 """
 
 from __future__ import annotations
@@ -23,8 +25,11 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from itertools import batched
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from wealthfolio_mcp import Mcp, McpError, load_wealthfolio, read_token, scrub
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
@@ -96,24 +101,6 @@ PRIVATE_COLUMNS = frozenset(
     )
 )
 
-OUTPUT_COLUMNS = (
-    "date",
-    "account",
-    "activityType",
-    "symbol",
-    "isin",
-    "instrumentType",
-    "quantity",
-    "unitPrice",
-    "amount",
-    "currency",
-    "fee",
-    "tax",
-    "fxRate",
-    "subtype",
-    "comment",
-)
-
 TRADE_TYPES = {"BUY": "BUY", "SAVINGS_PLAN_EXECUTED": "BUY", "SELL": "SELL"}
 # CRYPTO stays out until a real export shows a symbol Wealthfolio can resolve.
 INSTRUMENT_TYPES = {"STOCK": "EQUITY", "FUND": "EQUITY"}
@@ -177,25 +164,37 @@ class Activity:
     # The ISIN a stock perk's cash bought; it pairs the perk with its BUY.
     perk_isin: str = ""
 
-    def csv_row(self) -> dict[str, str]:
-        """Return the row in Wealthfolio's column names."""
-        return {
+    def import_row(self, account_id: str) -> dict[str, Any]:
+        """Return the row as a Wealthfolio import row, in its field names.
+
+        The comment holds the Trade Republic ID. Wealthfolio hashes it into the
+        row's duplicate key, so a second import of the row is a duplicate.
+        """
+        row: dict[str, Any] = {
             "date": self.date.isoformat(),
-            "account": self.account,
             "activityType": self.activity_type,
-            "symbol": self.symbol,
-            "isin": self.symbol,
-            "instrumentType": self.instrument_type,
-            "quantity": fmt(self.quantity),
-            "unitPrice": fmt(self.unit_price),
-            "amount": fmt(self.amount),
             "currency": self.currency,
-            "fee": fmt(self.fee),
-            "tax": fmt(self.tax),
-            "fxRate": "",
-            "subtype": self.subtype,
+            "accountId": account_id,
             "comment": SOURCE_PREFIX + self.source_id,
+            "lineNumber": self.line,
         }
+        if self.symbol:
+            row |= {
+                "symbol": self.symbol,
+                "isin": self.symbol,
+                "instrumentType": self.instrument_type,
+            }
+        numbers = {
+            "quantity": self.quantity,
+            "unitPrice": self.unit_price,
+            "amount": self.amount,
+            "fee": self.fee,
+            "tax": self.tax,
+        }
+        row |= {name: value for name, value in numbers.items() if value is not None}
+        if self.subtype:
+            row["subtype"] = self.subtype
+        return row
 
     def cash(self) -> Decimal:
         """Return the cash total the summary adds up for this row."""
@@ -208,7 +207,7 @@ class Activity:
 
 @dataclass(frozen=True)
 class Unmapped:
-    """An export row left out of the CSV, with the reason."""
+    """An export row left out of the import, with the reason."""
 
     line: int
     category: str
@@ -366,7 +365,7 @@ def mapper_for(category: str, kind: str) -> Mapper | None:
 
 
 def map_row(row: Row, accounts: dict[str, str]) -> Activity | Unmapped:
-    """Map one export row, or say why it stays out of the CSV."""
+    """Map one export row, or say why it stays out of the import."""
     category, kind = row.code("category"), row.code("type")
 
     # Raw text, not upper-cased: a capitalized name must not pass as a code.
@@ -703,7 +702,7 @@ def find_duplicates(
 ) -> list[str]:
     """List rows of this run that look like another row: same ID, or same booking.
 
-    A group of rows that earlier runs wrote was flagged then already.
+    A group of rows that earlier imports sent was flagged then already.
     """
     in_run = {activity.line for activity in new}
     notes: list[str] = []
@@ -768,7 +767,7 @@ def summarize(result: Result, previous: set[str], new: Sequence[Activity]) -> st
         (f"already in the ledger: {seen}, in this run: {len(new)}"),
     ]
     if previous and not new:
-        lines.append("nothing new since the last written run")
+        lines.append("nothing new since the last import")
     lines.extend(run_totals(new))
     taxed = sum(
         a.activity_type in {"DIVIDEND", "INTEREST"} and bool(a.tax) for a in new
@@ -815,13 +814,14 @@ def summarize(result: Result, previous: set[str], new: Sequence[Activity]) -> st
     cancelled = sorted({u.line for u in result.unmapped if u.type == "BUY_CANCELLED"})
     if cancelled:
         lines.append(
-            f"  BUY_CANCELLED on lines {cancelled[:10]}: the cancelled BUY is still"
+            f"  BUY_CANCELLED on lines {cancelled[:10]}: the cancelled BUY is"
             + (
-                " in this CSV, or in Wealthfolio if an earlier run wrote it."
+                " in this run, or in Wealthfolio if an earlier import holds it."
                 if previous
-                else " in the CSV."
+                else " in this run."
             )
-            + " Find it by ISIN and date, and remove it."
+            + " After the import, find it in Wealthfolio by ISIN and date, and"
+            " delete it."
         )
     lines.append("possible duplicates:")
     notes = find_duplicates(result.activities, new)
@@ -829,11 +829,38 @@ def summarize(result: Result, previous: set[str], new: Sequence[Activity]) -> st
     return "\n".join(lines)
 
 
-def load_accounts(path: Path) -> dict[str, str]:
-    """Read the Wealthfolio account name for each Trade Republic account type."""
+# Wealthfolio's "draft" tools only preview, and its commit tool posts the rows. So
+# the user approves the preview, and `--commit` imports.
+# The commit tool takes up to 1000 rows. A smaller batch leaves less half done
+# when a call fails.
+BATCH_SIZE = 200
+# Each tool the script calls, and the token scope that it adds.
+TOOL_SCOPES = {
+    "get_accounts": "accounts:read",
+    "prepare_activity_import": "activities:read and activities:draft",
+    "commit_activity_import": "activities:write",
+    "prepare_account_change": "accounts:write",
+    "commit_account_change": "accounts:write",
+}
+PREVIEW_TOOLS = ("get_accounts", "prepare_activity_import")
+COMMIT_TOOL = "commit_activity_import"
+ACCOUNT_TOOLS = ("prepare_account_change", "commit_account_change")
+# A created account. Its cost basis is FIFO, Wealthfolio's default: MCP cannot set it.
+NEW_ACCOUNT = {"accountType": "SECURITIES", "trackingMode": "TRANSACTIONS"}
+# Row statuses after a commit that mean Wealthfolio holds the row.
+STORED_STATUSES = frozenset(("imported", "draft", "duplicate_skipped"))
+LINE_LIMIT = 10
+
+
+def load_config(path: Path) -> dict[str, Any]:
+    """Read `config.local.toml`."""
     if not path.is_file():
         raise ExportError(f"No config at {path}. Copy config.example.toml there.")
-    config = tomllib.loads(path.read_text(encoding="utf-8"))
+    return tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+def load_accounts(config: dict[str, Any], path: Path) -> dict[str, str]:
+    """Return the Wealthfolio account name for each Trade Republic account type."""
     accounts = config.get("trade_republic", {}).get("accounts", {})
     if not accounts:
         raise ExportError(f"{path} has no [trade_republic.accounts] table.")
@@ -841,36 +868,293 @@ def load_accounts(path: Path) -> dict[str, str]:
 
 
 def load_ledger(path: Path) -> set[str]:
-    """Return the transaction IDs that earlier written runs exported."""
+    """Return the transaction IDs that Wealthfolio holds from earlier imports."""
     if not path.is_file():
         return set()
     ledger = json.loads(path.read_text(encoding="utf-8"))
-    ids = ledger.get("transaction_ids") if isinstance(ledger, dict) else None
+    if isinstance(ledger, dict) and "transaction_ids" in ledger:
+        # The CSV version's key: it lists rows written to a CSV, not imported ones.
+        raise ExportError(
+            f"{path} is from the CSV version of this skill. Move it to"
+            f" archive/{SOURCE_DIR}/: Wealthfolio skips the rows it already holds."
+        )
+    ids = ledger.get("imported_ids") if isinstance(ledger, dict) else None
     if not isinstance(ids, list):
-        raise ExportError(f"{path} has no transaction_ids list.")
+        raise ExportError(f"{path} has no imported_ids list.")
     return set(map(str, ids))
 
 
-def write_outputs(
-    out_dir: Path, source: Path, new: Sequence[Activity], ids: set[str]
-) -> Path:
-    """Write the import CSV and the updated ledger, and return the CSV path."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    target = out_dir / f"{source.stem}.wealthfolio.csv"
-    if target.exists():
+def require(tools: set[str], needed: Iterable[str]) -> None:
+    """Fail when the token cannot reach a tool, and name the scope it lacks."""
+    missing = [name for name in needed if name not in tools]
+    if missing:
+        scopes = sorted({TOOL_SCOPES[name] for name in missing})
         raise ExportError(
-            f"{target} exists. Import it into Wealthfolio,"
-            f" then move it to archive/{SOURCE_DIR}/."
+            f"The token cannot use {', '.join(missing)}. Add the scopes"
+            f" {', '.join(scopes)} to it in Wealthfolio."
         )
-    with target.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=OUTPUT_COLUMNS, lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(activity.csv_row() for activity in new)
-    ledger = {"transaction_ids": sorted(ids)}
-    (out_dir / LEDGER_NAME).write_text(
-        json.dumps(ledger, indent=1) + "\n", encoding="utf-8"
-    )
-    return target
+
+
+def stored_accounts(mcp: Mcp) -> list[dict[str, Any]]:
+    """Return every Wealthfolio account, hidden and archived ones too."""
+    arguments = {"displayMode": "compact", "includeHidden": True}
+    output = mcp.call("get_accounts", arguments | {"includeArchived": True})
+    accounts = output.get("accounts")
+    return [a for a in accounts if isinstance(a, dict)] if accounts else []
+
+
+def account_state(stored: Sequence[dict[str, Any]], name: str) -> str:
+    """Say whether an account name is usable: `found`, `missing` or a problem."""
+    matches = [account for account in stored if account.get("name") == name]
+    if not matches:
+        return "missing"
+    if len(matches) > 1:
+        return f"{len(matches)} accounts have this name"
+    account = matches[0]
+    if account.get("isArchived") or not account.get("isActive", True):
+        return "archived or hidden"
+    if account.get("trackingMode") == "HOLDINGS":
+        return "HOLDINGS tracking mode, which activities do not change"
+    return "found"
+
+
+def labels_by_name(accounts: dict[str, str]) -> dict[str, str]:
+    """Name each Wealthfolio account by its Trade Republic account types."""
+    kinds: dict[str, list[str]] = defaultdict(list)
+    for kind, name in sorted(accounts.items()):
+        kinds[name].append(kind)
+    return {name: "/".join(names) for name, names in kinds.items()}
+
+
+def lines_of(lines: Sequence[int]) -> str:
+    """Show the first file lines of a group."""
+    more = len(lines) - LINE_LIMIT
+    shown = f"lines {sorted(lines)[:LINE_LIMIT]}"
+    return shown + (f" and {more} more" if more > 0 else "")
+
+
+def grouped(title: str, groups: dict[str, list[int]]) -> list[str]:
+    """List each message with the file lines it holds for."""
+    lines = [title]
+    lines.extend(f"  {text}: {lines_of(at)}" for text, at in sorted(groups.items()))
+    return lines if groups else [*lines, "  none"]
+
+
+def add_messages(
+    groups: dict[str, list[int]], row: dict[str, Any], key: str, default: str = ""
+) -> None:
+    """Add a server row's errors or warnings to `groups`, by message."""
+    line = int(row.get("lineNumber") or 0)
+    for message in row.get(key) or ([default] if default else []):
+        groups[scrub(message)].append(line)
+
+
+def save_ledger(path: Path, ids: set[str]) -> None:
+    """Write the transaction IDs that Wealthfolio holds."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ledger = {"imported_ids": sorted(ids)}
+    path.write_text(json.dumps(ledger, indent=1) + "\n", encoding="utf-8")
+
+
+Batch = list[tuple[Activity, dict[str, Any]]]
+
+
+@dataclass
+class Tally:
+    """What the commit calls so far did to each row."""
+
+    statuses: Counter[str] = field(default_factory=Counter)
+    drafts: list[int] = field(default_factory=list)
+    failed: dict[str, list[int]] = field(default_factory=lambda: defaultdict(list))
+
+    def add(self, output: dict[str, Any], batch: Batch, ids: set[str]) -> None:
+        """Count one batch's rows, and add the rows Wealthfolio holds to `ids`."""
+        for row in output.get("failed", []):
+            add_messages(self.failed, row, "errors", "no reason given")
+        for item in output.get("financialRows", []):
+            index = item.get("index")
+            if not isinstance(index, int) or not 0 <= index < len(batch):
+                raise McpError(f"{COMMIT_TOOL} sent a row index outside the batch.")
+            activity = batch[index][0]
+            status = str(item.get("financialStatus", "failed"))
+            self.statuses[status] += 1
+            if status in STORED_STATUSES:
+                ids.add(activity.source_id)
+            if status == "draft":
+                self.drafts.append(activity.line)
+
+    def lines(self) -> list[str]:
+        """Report the counts, the drafts to approve and the failed rows."""
+        counts = ", ".join(
+            f"{status} {self.statuses[status]}"
+            for status in ("imported", "draft", "duplicate_skipped", "failed")
+        )
+        lines = [f"commit: {counts}"]
+        if self.drafts:
+            lines.append(
+                f"  drafts on {lines_of(self.drafts)}: Wealthfolio could not set their"
+                " cash amount. Review and approve them in Wealthfolio."
+            )
+        return lines + (grouped("failed rows:", self.failed) if self.failed else [])
+
+
+@dataclass
+class Sync:
+    """One run against Wealthfolio: preview the new rows, and import with `commit`."""
+
+    mcp: Mcp
+    report: list[str]
+    commit: bool
+    tools: set[str] = field(default_factory=set)
+
+    def run(
+        self,
+        accounts: dict[str, str],
+        new: Sequence[Activity],
+        ledger: Path,
+        previous: set[str],
+    ) -> None:
+        """Preview the rows, then import them with `commit`."""
+        self.tools = self.mcp.tool_names()
+        require(self.tools, PREVIEW_TOOLS + ((COMMIT_TOOL,) if self.commit else ()))
+        ids = self.account_ids(accounts, new)
+        rows = [(a, a.import_row(ids[a.account])) for a in new if a.account in ids]
+        if len(rows) < len(new):
+            missing = len(new) - len(rows)
+            self.report.append(f"not previewed: {missing} rows of a missing account")
+        batches = [list(batch) for batch in batched(rows, BATCH_SIZE)]
+        invalid = self.preview(batches)
+        if not self.commit:
+            self.report.append(
+                "nothing imported: rerun with --commit after the user agrees"
+            )
+            return
+        if invalid:
+            raise ExportError(
+                f"Nothing imported: Wealthfolio finds {invalid} rows invalid."
+            )
+        self.import_batches(batches, ledger, set(previous))
+
+    def account_ids(
+        self, accounts: dict[str, str], new: Sequence[Activity]
+    ) -> dict[str, str]:
+        """Return the Wealthfolio account ID of each account name the run uses.
+
+        A missing account is created with `commit`, and only checked without it.
+        """
+        stored = stored_accounts(self.mcp)
+        ids: dict[str, str] = {}
+        for name, label in labels_by_name(accounts).items():
+            rows = [activity for activity in new if activity.account == name]
+            state = account_state(stored, name) if rows else "unused"
+            if state == "found":
+                account = next(a for a in stored if a.get("name") == name)
+                ids[name] = str(account["id"])
+                other = sum(a.currency != account.get("currency") for a in rows)
+                self.report.append(
+                    f"account for {label}: found"
+                    + (f", rows in another currency: {other}" if other else "")
+                )
+            elif state == "missing":
+                created = self.create_account(name, label, rows)
+                if created:
+                    ids[name] = created
+            elif state != "unused":
+                raise ExportError(
+                    f"The Wealthfolio account for {label}: {state}. Fix it there."
+                )
+        return ids
+
+    def create_account(
+        self, name: str, label: str, rows: Sequence[Activity]
+    ) -> str | None:
+        """Check a new account with Wealthfolio, and create it with `commit`."""
+        currencies = sorted({activity.currency for activity in rows})
+        if len(currencies) > 1:
+            raise ExportError(
+                f"No Wealthfolio account for {label}, and its rows use"
+                f" {', '.join(currencies)}. Create the account in Wealthfolio."
+            )
+        require(self.tools, ACCOUNT_TOOLS)
+        arguments = {"name": name, "currency": currencies[0], **NEW_ACCOUNT}
+        plan = self.mcp.call("prepare_account_change", arguments)
+        if plan.get("errors"):
+            reasons = "; ".join(scrub(error) for error in plan["errors"])
+            raise ExportError(f"Wealthfolio refuses the account for {label}: {reasons}")
+        form = f"SECURITIES, {currencies[0]}, TRANSACTIONS, cost basis FIFO by default"
+        if not self.commit:
+            self.report.append(
+                f"account for {label}: missing. --commit creates it ({form})."
+            )
+            return None
+        saved = self.mcp.call("commit_account_change", arguments)
+        account_id = (saved.get("account") or {}).get("id")
+        if not saved.get("committed") or not account_id:
+            reasons = "; ".join(scrub(error) for error in saved.get("errors", []))
+            raise ExportError(f"Wealthfolio did not create the account: {reasons}")
+        self.report.append(f"account for {label}: created ({form})")
+        return str(account_id)
+
+    def preview(self, batches: Sequence[Batch]) -> int:
+        """Report Wealthfolio's check of the rows, and return the invalid count."""
+        rows = invalid = 0
+        errors: dict[str, list[int]] = defaultdict(list)
+        warnings: dict[str, list[int]] = defaultdict(list)
+        duplicates: list[int] = []
+        for batch in batches:
+            output = self.mcp.call(
+                "prepare_activity_import", {"activities": [row for _, row in batch]}
+            )
+            for row in output.get("rows", []):
+                rows += 1
+                if not row.get("isValid") or row.get("errors"):
+                    invalid += 1
+                    add_messages(errors, row, "errors", "no reason given")
+                if row.get("isDuplicate"):
+                    duplicates.append(int(row.get("lineNumber") or 0))
+                add_messages(warnings, row, "warnings")
+        self.report.append(
+            f"Wealthfolio preview: rows {rows}, invalid {invalid},"
+            f" already in Wealthfolio {len(duplicates)}"
+        )
+        if duplicates:
+            self.report.append(f"  already in Wealthfolio: {lines_of(duplicates)}")
+        self.report.extend(grouped("invalid rows:", errors))
+        self.report.extend(grouped("warnings:", warnings))
+        return invalid
+
+    def import_batches(
+        self, batches: Sequence[Batch], ledger: Path, ids: set[str]
+    ) -> None:
+        """Import the batches in turn, and save the ledger after each one.
+
+        On a failed call, the report says what Wealthfolio holds and what it never got.
+        """
+        tally = Tally()
+        for number, batch in enumerate(batches, 1):
+            try:
+                output = self.mcp.call(
+                    COMMIT_TOOL, {"activities": [row for _, row in batch]}
+                )
+            except McpError:
+                unsent = sum(len(b) for b in batches[number:])
+                self.report.extend(tally.lines())
+                self.report.append(
+                    f"batch {number} of {len(batches)} failed, file"
+                    f" {lines_of([a.line for a, _ in batch])}. Wealthfolio may hold"
+                    " some of them: a rerun skips those as duplicates."
+                    f" Rows never sent: {unsent}."
+                )
+                raise
+            tally.add(output, batch, ids)
+            save_ledger(ledger, ids)
+            if not output.get("financialRows"):
+                self.report.extend(tally.lines())
+                raise ExportError(
+                    f"Wealthfolio refused batch {number} of {len(batches)} and"
+                    " imported none of it: a row failed its validation."
+                )
+        self.report.extend(tally.lines())
 
 
 def data_dir() -> Path:
@@ -888,24 +1172,55 @@ def data_dir() -> Path:
     )
 
 
-def run_convert(args: argparse.Namespace) -> str:
-    """Run `convert` and return what to print."""
-    out_dir = args.out or data_dir() / "out" / SOURCE_DIR
-    config = args.config or data_dir() / CONFIG_NAME
-    result = convert(args.export.read_text(encoding="utf-8"), load_accounts(config))
-    previous = load_ledger(out_dir / LEDGER_NAME)
-    # --all keeps rows of earlier runs, for a CSV that was written but never imported.
+def run_import(args: argparse.Namespace, report: list[str]) -> None:
+    """Run `import`, and add what to print to `report`."""
+    config_path = args.config or data_dir() / CONFIG_NAME
+    config = load_config(config_path)
+    accounts = load_accounts(config, config_path)
+    result = convert(args.export.read_text(encoding="utf-8"), accounts)
+    ledger = (args.out or data_dir() / "out" / SOURCE_DIR) / LEDGER_NAME
+    previous = load_ledger(ledger)
+    # --all sends rows of earlier imports again, for activities deleted in Wealthfolio.
     new = [a for a in result.activities if args.all or a.source_id not in previous]
-    report = summarize(result, previous, new)
-    if args.write and not new:
-        report += "\nnothing written: no row is new"
-    elif args.write:
-        ids = previous | {a.source_id for a in result.activities}
-        target = write_outputs(out_dir, args.export, new, ids)
-        report += f"\nwrote {len(new)} rows to {target}"
-    else:
-        report += "\nnothing written: rerun with --write after the user agrees"
-    return report
+    report.append(summarize(result, previous, new))
+    if not new:
+        report.append("nothing to import: no row is new")
+        return
+    wealthfolio = load_wealthfolio(config, config_path)
+    with Mcp(wealthfolio.url, read_token(wealthfolio.token_command)) as mcp:
+        Sync(mcp, report, commit=args.commit).run(accounts, new, ledger, previous)
+
+
+def run_check(args: argparse.Namespace, report: list[str]) -> None:
+    """Run `check`: test the config, the token, the scopes and the accounts."""
+    config_path = args.config or data_dir() / CONFIG_NAME
+    config = load_config(config_path)
+    accounts = load_accounts(config, config_path)
+    wealthfolio = load_wealthfolio(config, config_path)
+    if wealthfolio.url.startswith("http://"):
+        report.append("mcp_url uses http: the token travels unencrypted.")
+    token = read_token(wealthfolio.token_command)
+    report.append("token command: ok")
+    with Mcp(wealthfolio.url, token) as mcp:
+        report.append(f"server: {mcp.server}")
+        tools = mcp.tool_names()
+        report.append("tools the token reaches:")
+        report.extend(
+            f"  {name}: " + ("yes" if name in tools else f"no, needs {scope}")
+            for name, scope in TOOL_SCOPES.items()
+        )
+        require(tools, ("get_accounts",))
+        stored = stored_accounts(mcp)
+        states = {
+            label: account_state(stored, name)
+            for name, label in labels_by_name(accounts).items()
+        }
+    report.append("accounts in the config:")
+    report.extend(f"  {label}: {state}" for label, state in states.items())
+    if all(state == "found" for state in states.values()) and tools.issuperset(
+        ACCOUNT_TOOLS
+    ):
+        report.append("Every account exists: remove accounts:write from the token.")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -914,36 +1229,51 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     inspect = commands.add_parser("inspect", help="show the header and value shapes")
     inspect.add_argument("export", type=Path)
-    conv = commands.add_parser(
-        "convert", help=f"summarize, and with --write, write out/{SOURCE_DIR}/"
+    importer = commands.add_parser(
+        "import", help="preview in Wealthfolio, and with --commit, import"
     )
-    conv.add_argument("export", type=Path)
-    conv.add_argument(
-        "--config", type=Path, help=f"default: ${DATA_DIR_ENV}/{CONFIG_NAME}"
+    importer.add_argument("export", type=Path)
+    check = commands.add_parser("check", help="test the connection and the token")
+    for command in (importer, check):
+        command.add_argument(
+            "--config", type=Path, help=f"default: ${DATA_DIR_ENV}/{CONFIG_NAME}"
+        )
+    importer.add_argument(
+        "--out",
+        type=Path,
+        help=f"ledger folder, default: ${DATA_DIR_ENV}/out/{SOURCE_DIR}",
     )
-    conv.add_argument(
-        "--out", type=Path, help=f"default: ${DATA_DIR_ENV}/out/{SOURCE_DIR}"
+    importer.add_argument(
+        "--all", action="store_true", help="send rows in the ledger again"
     )
-    conv.add_argument("--all", action="store_true", help="include rows in the ledger")
-    conv.add_argument(
-        "--write", action="store_true", help="write the CSV and the ledger"
+    importer.add_argument(
+        "--commit",
+        action="store_true",
+        help="create the account and the activities, and write the ledger",
     )
     args = parser.parse_args(argv)
+    report: list[str] = []
     try:
         if args.command == "inspect":
-            print(inspect_export(args.export.read_text(encoding="utf-8")))
+            report.append(inspect_export(args.export.read_text(encoding="utf-8")))
+        elif args.command == "check":
+            run_check(args, report)
         else:
-            print(run_convert(args))
+            run_import(args, report)
     except (
         ExportError,
+        McpError,
         OSError,
         UnicodeDecodeError,
         csv.Error,
         tomllib.TOMLDecodeError,
         json.JSONDecodeError,
     ) as error:
+        if report:
+            print("\n".join(report))
         print(f"error: {error}", file=sys.stderr)
         return 1
+    print("\n".join(report))
     return 0
 
 

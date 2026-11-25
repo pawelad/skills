@@ -28,13 +28,19 @@ directory.
 - A script prints only aggregates: counts, totals, codes, value shapes and reasons. It
   never prints a row, a name, a description or an account number.
 - A script writes into its `$FINANCE_DIR/out/<source>/` only with an explicit flag, such
-  as `--write`. It never writes into another app's data.
+  as `--commit`.
+- A script never writes into another app's data, with one exception. It may add
+  Wealthfolio accounts and activities through Wealthfolio's MCP server, with the user's
+  scoped token, and only with `--commit`. It never edits or deletes there, and never
+  opens an app's database or files.
+- A script reads a token only from the command in `config.local.toml`. It never prints
+  the token, and never follows a redirect with it.
 - A row the script cannot map is listed with its reason, never guessed.
 
 ## Layout
 
-- When a second source needs Wealthfolio output, extract the shared part into a
-  `wealthfolio-import` skill.
+- When a second source imports into Wealthfolio, extract the shared part into a
+  `wealthfolio-import` skill. `trade-republic/scripts/wealthfolio_mcp.py` is its start.
 
 ## Done
 

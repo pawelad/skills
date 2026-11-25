@@ -2,22 +2,32 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import json
 import os
 import subprocess
 import sys
+import threading
 from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from types import ModuleType
+from typing import TYPE_CHECKING, Any
 
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from types import ModuleType
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "skills/finance/trade-republic/scripts/trade_republic.py"
 FIXTURES = Path(__file__).parent / "fixtures/trade-republic"
 ACCOUNTS = {"DEFAULT": "Example Broker"}
+ACCOUNT_ID = "00000000-0000-4000-8000-0000000000a0"
 
 
 def load_module() -> ModuleType:
+    # `uv run` puts the script's folder on the path, for its `wealthfolio_mcp` import.
+    sys.path.insert(0, str(SCRIPT.parent))
     spec = importlib.util.spec_from_file_location("trade_republic", SCRIPT)
     assert spec
     assert spec.loader
@@ -35,20 +45,240 @@ def read(name: str) -> str:
 
 
 def rows_by_id(result: object) -> dict[str, dict[str, str]]:
+    """Return each import row, with its numbers as text, by the ID's last digits."""
     activities = result.activities  # type: ignore[attr-defined]
-    return {a.source_id[-3:]: a.csv_row() for a in activities}
+    return {
+        a.source_id[-3:]: {
+            key: tr.fmt(value) if isinstance(value, Decimal) else str(value)
+            for key, value in a.import_row(ACCOUNT_ID).items()
+        }
+        for a in activities
+    }
 
 
 def pick(row: dict[str, str], *columns: str) -> tuple[str, ...]:
-    return tuple(row[column] for column in columns)
+    return tuple(row.get(column, "") for column in columns)
+
+
+# A fake Wealthfolio MCP server: it records each call, over state a test sets up.
+TOKEN = "wf-test-token-not-real"  # noqa: S105
+SESSION = "00000000-0000-4000-8000-00000000c0de"
+TOOLS = frozenset(
+    (
+        "get_accounts",
+        "prepare_account_change",
+        "commit_account_change",
+        "prepare_activity_import",
+        "commit_activity_import",
+    )
+)
+
+
+class FakeWealthfolio:
+    """The tools the import calls, over the state that a test sets up."""
+
+    def __init__(self) -> None:
+        """Start with no accounts, no activities and every tool."""
+        self.url = ""
+        self.methods: list[str] = []
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.accounts: list[dict[str, Any]] = []
+        # Stored activities by duplicate key: account and comment, as Wealthfolio
+        # hashes the comment into its key.
+        self.stored: dict[tuple[str, str], dict[str, Any]] = {}
+        self.tools = set(TOOLS)
+        # Tool name and the call number that answers HTTP 500.
+        self.fail: tuple[str, int] | None = None
+        self.drafts: set[str] = set()
+        # Comment and the error Wealthfolio gives the row.
+        self.invalid: dict[str, str] = {}
+        self.sse = False
+        self.redirect = False
+
+    def add_account(self, name: str, currency: str = "EUR", **extra: Any) -> str:  # noqa: ANN401
+        """Store an account and return its ID."""
+        account_id = f"00000000-0000-4000-8000-0000000000a{len(self.accounts)}"
+        self.accounts.append(
+            {
+                "id": account_id,
+                "name": name,
+                "accountType": "SECURITIES",
+                "currency": currency,
+                "isActive": True,
+                "isArchived": False,
+                "trackingMode": "TRANSACTIONS",
+                "isDefault": False,
+            }
+            | extra
+        )
+        return account_id
+
+    def tool_calls(self, name: str) -> list[dict[str, Any]]:
+        """Return the arguments of each call of a tool."""
+        return [arguments for tool, arguments in self.calls if tool == name]
+
+    def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Run a tool."""
+        self.calls.append((name, arguments))
+        if name == "get_accounts":
+            return {"accounts": self.accounts, "count": len(self.accounts)}
+        if name == "prepare_account_change":
+            return {"action": "create", "ready": True, "errors": []}
+        if name == "commit_account_change":
+            fields = {key: arguments[key] for key in ("accountType", "trackingMode")}
+            account_id = self.add_account(
+                arguments["name"], arguments["currency"], **fields
+            )
+            return {"committed": True, "account": {"id": account_id}}
+        rows = arguments["activities"]
+        if name == "prepare_activity_import":
+            return {"rows": [self.check(row) for row in rows]}
+        return self.commit(rows)
+
+    def check(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Validate a row and flag it when Wealthfolio has it."""
+        error = self.invalid.get(row["comment"])
+        return {
+            "lineNumber": row["lineNumber"],
+            "isValid": error is None,
+            "isDuplicate": (row["accountId"], row["comment"]) in self.stored,
+            "errors": [error] if error else [],
+            "warnings": [],
+        }
+
+    def commit(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """Import rows as one run, as `commit_activity_import` does."""
+        checked = [self.check(row) for row in rows]
+        failed = [row for row in checked if not row["isValid"]]
+        if failed:
+            return {"financialRows": [], "failed": failed, "summary": {}}
+        statuses = []
+        for index, row in enumerate(rows):
+            key = (row["accountId"], row["comment"])
+            if key in self.stored:
+                status = "duplicate_skipped"
+            else:
+                self.stored[key] = row
+                status = "draft" if row["comment"] in self.drafts else "imported"
+            statuses.append({"index": index, "financialStatus": status})
+        return {"financialRows": statuses, "importRunId": "run", "summary": {}}
+
+
+class Handler(BaseHTTPRequestHandler):
+    """Speak Streamable HTTP MCP for one fake server."""
+
+    server: Server
+
+    def log_message(self, *_: object) -> None:
+        """Keep the test output quiet."""
+
+    def reply(self, status: int, body: dict[str, Any] | None = None) -> None:
+        """Send a JSON or event stream body."""
+        fake = self.server.fake
+        self.send_response(status)
+        self.send_header("Mcp-Session-Id", SESSION)
+        if body is None:
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        text = json.dumps(body)
+        if fake.sse:
+            text = f"event: message\ndata: {text}\n\n"
+        data = text.encode("utf-8")
+        kind = "text/event-stream" if fake.sse else "application/json"
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_DELETE(self) -> None:
+        """End the session."""
+        self.server.fake.methods.append("DELETE")
+        self.reply(200, {})
+
+    def do_POST(self) -> None:
+        """Answer one JSON-RPC message."""
+        fake = self.server.fake
+        length = int(self.headers.get("Content-Length", "0"))
+        message = json.loads(self.rfile.read(length))
+        if fake.redirect:
+            self.send_response(307)
+            self.send_header("Location", "http://127.0.0.1:9/mcp")
+            self.end_headers()
+            return
+        if self.headers.get("Authorization") != f"Bearer {TOKEN}":
+            self.reply(401, {"jsonrpc": "2.0", "error": {"code": -32000}, "id": None})
+            return
+        method = message["method"]
+        fake.methods.append(method)
+        if "id" not in message:
+            self.reply(202)
+            return
+        result = self.result(method, message.get("params", {}))
+        if result is None:
+            self.reply(500, {})
+            return
+        self.reply(200, {"jsonrpc": "2.0", "id": message["id"], "result": result})
+
+    def result(self, method: str, params: dict[str, Any]) -> dict[str, Any] | None:
+        """Return a method's result, or `None` for an HTTP 500."""
+        fake = self.server.fake
+        if method == "initialize":
+            return {
+                "protocolVersion": "2025-03-26",
+                "serverInfo": {"name": "wealthfolio", "version": "3.13.1"},
+                "capabilities": {"tools": {}},
+            }
+        if method == "tools/list":
+            return {"tools": [{"name": name} for name in sorted(fake.tools)]}
+        name = params["name"]
+        if fake.fail == (name, len(fake.tool_calls(name)) + 1):
+            fake.calls.append((name, params["arguments"]))
+            return None
+        if name not in fake.tools:
+            text = f"Scope denied: {name}"
+            return {"isError": True, "content": [{"type": "text", "text": text}]}
+        output = fake.call(name, params["arguments"])
+        content = [{"type": "text", "text": json.dumps(output)}]
+        return {"content": content, "structuredContent": output}
+
+
+class Server(ThreadingHTTPServer):
+    """An HTTP server that holds its fake Wealthfolio."""
+
+    fake: FakeWealthfolio
 
 
 @pytest.fixture
-def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    (tmp_path / "inbox/trade-republic").mkdir(parents=True)
-    (tmp_path / "config.local.toml").write_text(
-        '[trade_republic.accounts]\nDEFAULT = "Example Broker"\n', encoding="utf-8"
+def wealthfolio() -> Iterator[FakeWealthfolio]:
+    """Run a fake Wealthfolio MCP server on a free local port."""
+    server = Server(("127.0.0.1", 0), Handler)
+    server.fake = FakeWealthfolio()
+    server.fake.url = f"http://127.0.0.1:{server.server_address[1]}/mcp"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server.fake
+    server.shutdown()
+    server.server_close()
+
+
+def write_config(
+    data_dir: Path, wealthfolio: FakeWealthfolio, token_command: list[str]
+) -> None:
+    command = ", ".join(json.dumps(part) for part in token_command)
+    (data_dir / "config.local.toml").write_text(
+        '[trade_republic.accounts]\nDEFAULT = "Example Broker"\n\n'
+        f'[wealthfolio]\nmcp_url = "{wealthfolio.url}"\ntoken_command = [{command}]\n',
+        encoding="utf-8",
     )
+
+
+@pytest.fixture
+def data_dir(
+    tmp_path: Path, wealthfolio: FakeWealthfolio, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    (tmp_path / "inbox/trade-republic").mkdir(parents=True)
+    write_config(tmp_path, wealthfolio, [sys.executable, "-c", f"print({TOKEN!r})"])
     monkeypatch.setenv("FINANCE_DIR", str(tmp_path))
     return tmp_path
 
@@ -106,16 +336,17 @@ def test_every_mapped_event_type_becomes_its_wealthfolio_activity() -> None:
 
 def test_every_row_carries_account_date_currency_and_source_reference() -> None:
     rows = rows_by_id(tr.convert(read("all-types.csv"), ACCOUNTS))
-    assert pick(
-        rows["004"], "date", "account", "currency", "comment", "instrumentType"
-    ) == (
+    cols = ("date", "accountId", "currency", "comment", "instrumentType", "isin")
+    assert pick(rows["004"], *cols) == (
         "2026-02-10",
-        "Example Broker",
+        ACCOUNT_ID,
         "EUR",
         "tr:00000000-0000-4000-8000-000000000004",
         "EQUITY",
+        "US00EXAMPLE2",
     )
-    assert all(row["fxRate"] == "" for row in rows.values())
+    assert rows["004"]["lineNumber"] == "5"
+    assert all("fxRate" not in row for row in rows.values())
 
 
 def test_rows_it_cannot_map_are_listed_with_a_reason() -> None:
@@ -295,12 +526,10 @@ def test_a_corrected_dividend_with_another_amount_is_a_possible_duplicate() -> N
     ]
 
 
-def test_a_cancelled_buy_warns_that_its_buy_is_still_in_the_csv() -> None:
+def test_a_cancelled_buy_warns_that_its_buy_is_in_this_run() -> None:
     text = read("all-types.csv").replace('"BUY","BOND"', '"BUY_CANCELLED","STOCK"')
     report = tr.summarize(tr.convert(text, ACCOUNTS), set(), [])
-    assert (
-        "BUY_CANCELLED on lines [17]: the cancelled BUY is still in the CSV" in report
-    )
+    assert "BUY_CANCELLED on lines [17]: the cancelled BUY is in this run." in report
 
 
 def test_polish_grouping_with_no_break_spaces_parses() -> None:
@@ -344,51 +573,209 @@ def test_inspect_shows_text_shifted_into_a_code_column_only_as_a_shape() -> None
     assert "'a a 9' x1" in report
 
 
-def test_convert_writes_nothing_without_write(
-    data_dir: Path, capsys: pytest.CaptureFixture[str]
+def export_file(data_dir: Path, name: str = "all-types.csv") -> Path:
+    export = data_dir / "inbox/trade-republic" / name
+    export.write_text(read(name), encoding="utf-8")
+    return export
+
+
+def ledger_ids(data_dir: Path) -> list[str]:
+    path = data_dir / "out/trade-republic/ledger.json"
+    ledger = json.loads(path.read_text(encoding="utf-8"))
+    return [str(source_id) for source_id in ledger["imported_ids"]]
+
+
+def comment(number: int) -> str:
+    return f"tr:00000000-0000-4000-8000-{number:012d}"
+
+
+def test_import_without_commit_previews_and_creates_nothing(
+    data_dir: Path, wealthfolio: FakeWealthfolio, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    export = data_dir / "inbox/trade-republic/export.csv"
-    export.write_text(read("all-types.csv"), encoding="utf-8")
-    assert tr.main(["convert", str(export)]) == 0
+    wealthfolio.add_account("Example Broker")
+    assert tr.main(["import", str(export_file(data_dir))]) == 0
+    out = capsys.readouterr().out
+    assert "Wealthfolio preview: rows 13, invalid 0, already in Wealthfolio 0" in out
+    assert "nothing imported: rerun with --commit" in out
+    assert [tool for tool, _ in wealthfolio.calls] == [
+        "get_accounts",
+        "prepare_activity_import",
+    ]
+    assert not wealthfolio.stored
     assert not (data_dir / "out").exists()
-    assert "nothing written" in capsys.readouterr().out
+    assert wealthfolio.methods[-1] == "DELETE"
 
 
-def test_rerun_after_write_finds_every_row_in_the_ledger(
-    data_dir: Path, capsys: pytest.CaptureFixture[str]
+def test_commit_imports_each_row_with_its_transaction_id_as_comment(
+    data_dir: Path, wealthfolio: FakeWealthfolio, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    export = data_dir / "inbox/trade-republic/export.csv"
-    export.write_text(read("all-types.csv"), encoding="utf-8")
-    assert tr.main(["convert", str(export), "--write"]) == 0
-    with (data_dir / "out/trade-republic/export.wealthfolio.csv").open(
-        encoding="utf-8"
-    ) as handle:
-        written = list(csv.DictReader(handle))
-    assert len(written) == 13
-    assert list(written[0]) == list(tr.OUTPUT_COLUMNS)
+    wealthfolio.sse = True
+    account_id = wealthfolio.add_account("Example Broker")
+    assert tr.main(["import", str(export_file(data_dir)), "--commit"]) == 0
+    out = capsys.readouterr().out
+    assert "commit: imported 13, draft 0, duplicate_skipped 0, failed 0" in out
+    assert {key[0] for key in wealthfolio.stored} == {account_id}
+    assert (account_id, comment(4)) in wealthfolio.stored
+    assert len(ledger_ids(data_dir)) == 13
+    assert not wealthfolio.tool_calls("commit_account_change")
+
+
+def test_commit_creates_a_missing_account_in_the_currency_of_its_rows(
+    data_dir: Path, wealthfolio: FakeWealthfolio, capsys: pytest.CaptureFixture[str]
+) -> None:
+    export = export_file(data_dir, "polish.csv")
+    assert tr.main(["import", str(export)]) == 0
+    out = capsys.readouterr().out
+    assert "account for DEFAULT: missing. --commit creates it (SECURITIES, PLN" in out
+    assert "not previewed: 5 rows of a missing account" in out
+    assert not wealthfolio.accounts
+    assert tr.main(["import", str(export), "--commit"]) == 0
+    assert "account for DEFAULT: created" in capsys.readouterr().out
+    assert wealthfolio.tool_calls("commit_account_change") == [
+        {
+            "name": "Example Broker",
+            "currency": "PLN",
+            "accountType": "SECURITIES",
+            "trackingMode": "TRANSACTIONS",
+        }
+    ]
+    assert {key[0] for key in wealthfolio.stored} == {wealthfolio.accounts[0]["id"]}
+    assert len(wealthfolio.stored) == 5
+
+
+def test_a_rerun_on_the_same_export_creates_nothing(
+    data_dir: Path, wealthfolio: FakeWealthfolio, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wealthfolio.add_account("Example Broker")
+    export = export_file(data_dir)
+    assert tr.main(["import", str(export), "--commit"]) == 0
+    stored = dict(wealthfolio.stored)
+    calls = len(wealthfolio.calls)
     capsys.readouterr()
-    assert tr.main(["convert", str(export)]) == 0
+    assert tr.main(["import", str(export), "--commit"]) == 0
     out = capsys.readouterr().out
     assert "already in the ledger: 13, in this run: 0" in out
-    assert "nothing new since the last written run" in out
+    assert "nothing to import: no row is new" in out
+    assert len(wealthfolio.calls) == calls
+    # --all sends every row again, and Wealthfolio skips the ones it holds.
+    assert tr.main(["import", str(export), "--commit", "--all"]) == 0
+    out = capsys.readouterr().out
+    assert "already in Wealthfolio 13" in out
+    assert "commit: imported 0, draft 0, duplicate_skipped 13, failed 0" in out
+    assert wealthfolio.stored == stored
 
 
-def test_a_rerun_with_write_keeps_the_csv_of_the_first_run(
-    data_dir: Path, capsys: pytest.CaptureFixture[str]
+def test_rows_wealthfolio_saves_as_drafts_are_listed_for_approval(
+    data_dir: Path, wealthfolio: FakeWealthfolio, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    export = data_dir / "inbox/trade-republic/export.csv"
-    export.write_text(read("all-types.csv"), encoding="utf-8")
-    assert tr.main(["convert", str(export), "--write"]) == 0
-    written = (data_dir / "out/trade-republic/export.wealthfolio.csv").read_text(
-        encoding="utf-8"
-    )
-    capsys.readouterr()
-    assert tr.main(["convert", str(export), "--write"]) == 0
-    assert "nothing written: no row is new" in capsys.readouterr().out
-    assert tr.main(["convert", str(export), "--all", "--write"]) == 1
-    assert "exists" in capsys.readouterr().err
-    csv_path = data_dir / "out/trade-republic/export.wealthfolio.csv"
-    assert csv_path.read_text(encoding="utf-8") == written
+    wealthfolio.add_account("Example Broker")
+    wealthfolio.drafts = {comment(1)}
+    assert tr.main(["import", str(export_file(data_dir)), "--commit"]) == 0
+    out = capsys.readouterr().out
+    assert "commit: imported 12, draft 1, duplicate_skipped 0, failed 0" in out
+    assert "drafts on lines [2]: Wealthfolio could not set their cash amount." in out
+    assert len(ledger_ids(data_dir)) == 13
+
+
+def test_rows_wealthfolio_finds_invalid_block_the_commit_and_hide_names(
+    data_dir: Path, wealthfolio: FakeWealthfolio, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wealthfolio.add_account("Example Broker")
+    wealthfolio.invalid = {comment(4): 'symbol: no quote for "Example Corp" at 180.5'}
+    assert tr.main(["import", str(export_file(data_dir)), "--commit"]) == 1
+    captured = capsys.readouterr()
+    assert 'symbol: no quote for "..." at 9.9: lines [5]' in captured.out
+    assert "Example Corp" not in captured.out + captured.err
+    assert "Nothing imported: Wealthfolio finds 1 rows invalid." in captured.err
+    assert not wealthfolio.tool_calls("commit_activity_import")
+    assert not (data_dir / "out").exists()
+
+
+def test_an_mcp_error_mid_run_reports_what_was_imported_and_what_was_not(
+    data_dir: Path,
+    wealthfolio: FakeWealthfolio,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tr, "BATCH_SIZE", 5)
+    wealthfolio.add_account("Example Broker")
+    wealthfolio.fail = ("commit_activity_import", 2)
+    export = export_file(data_dir)
+    assert tr.main(["import", str(export), "--commit"]) == 1
+    captured = capsys.readouterr()
+    assert "commit: imported 5, draft 0, duplicate_skipped 0, failed 0" in captured.out
+    assert "batch 2 of 3 failed, file lines [7, 8, 9, 10, 11]." in captured.out
+    assert "Rows never sent: 3." in captured.out
+    assert "HTTP 500" in captured.err
+    assert len(wealthfolio.stored) == 5
+    assert sorted(ledger_ids(data_dir)) == sorted(c[3:] for _, c in wealthfolio.stored)
+    wealthfolio.fail = None
+    assert tr.main(["import", str(export), "--commit"]) == 0
+    assert "commit: imported 8," in capsys.readouterr().out
+    assert len(wealthfolio.stored) == 13
+
+
+def test_a_failing_token_command_stops_before_any_request(
+    data_dir: Path, wealthfolio: FakeWealthfolio, capsys: pytest.CaptureFixture[str]
+) -> None:
+    leak = f"import sys; sys.stderr.write({TOKEN!r}); sys.exit(3)"
+    write_config(data_dir, wealthfolio, [sys.executable, "-c", leak])
+    assert tr.main(["import", str(export_file(data_dir))]) == 1
+    captured = capsys.readouterr()
+    assert "Token command failed with exit code 3" in captured.err
+    assert TOKEN not in captured.out + captured.err
+    assert not wealthfolio.methods
+
+
+def test_a_rejected_token_is_reported_without_the_token(
+    data_dir: Path, wealthfolio: FakeWealthfolio, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_config(data_dir, wealthfolio, [sys.executable, "-c", "print('wf-other')"])
+    assert tr.main(["import", str(export_file(data_dir))]) == 1
+    err = capsys.readouterr().err
+    assert "Wealthfolio rejected the token (HTTP 401)" in err
+    assert "wf-other" not in err
+
+
+def test_a_redirect_is_refused_so_the_token_stays_with_the_server(
+    data_dir: Path, wealthfolio: FakeWealthfolio, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wealthfolio.redirect = True
+    assert tr.main(["import", str(export_file(data_dir))]) == 1
+    assert "HTTP 307: mcp_url redirects" in capsys.readouterr().err
+
+
+def test_a_token_without_the_commit_scope_names_the_missing_scope(
+    data_dir: Path, wealthfolio: FakeWealthfolio, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wealthfolio.add_account("Example Broker")
+    wealthfolio.tools.discard("commit_activity_import")
+    export = export_file(data_dir)
+    assert tr.main(["import", str(export)]) == 0
+    assert tr.main(["import", str(export), "--commit"]) == 1
+    assert "Add the scopes activities:write" in capsys.readouterr().err
+    assert not wealthfolio.stored
+
+
+@pytest.mark.usefixtures("data_dir")
+def test_check_reports_scopes_and_accounts_without_their_names(
+    wealthfolio: FakeWealthfolio, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wealthfolio.add_account("Example Broker")
+    assert tr.main(["check"]) == 0
+    out = capsys.readouterr().out
+    assert "token command: ok\nserver: wealthfolio 3.13.1\n" in out
+    assert "  commit_activity_import: yes\n" in out
+    assert "  DEFAULT: found\n" in out
+    assert "remove accounts:write from the token" in out
+    assert "Example Broker" not in out
+    assert TOKEN not in out
+    wealthfolio.accounts[0]["isArchived"] = True
+    wealthfolio.tools -= {"commit_account_change", "prepare_account_change"}
+    assert tr.main(["check"]) == 0
+    out = capsys.readouterr().out
+    assert "  DEFAULT: archived or hidden\n" in out
+    assert "  commit_account_change: no, needs accounts:write\n" in out
 
 
 @pytest.mark.parametrize(
@@ -400,18 +787,15 @@ def test_a_broken_config_or_ledger_is_an_error_not_a_traceback(
 ) -> None:
     (data_dir / "out/trade-republic").mkdir(parents=True)
     (data_dir / name).write_text(content, encoding="utf-8")
-    export = data_dir / "inbox/trade-republic/export.csv"
-    export.write_text(read("all-types.csv"), encoding="utf-8")
-    assert tr.main(["convert", str(export)]) == 1
+    assert tr.main(["import", str(export_file(data_dir))]) == 1
     assert capsys.readouterr().err.startswith("error:")
 
 
 def test_summary_holds_counts_and_totals_but_no_personal_text(
-    data_dir: Path, capsys: pytest.CaptureFixture[str]
+    data_dir: Path, wealthfolio: FakeWealthfolio, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    export = data_dir / "inbox/trade-republic/export.csv"
-    export.write_text(read("all-types.csv"), encoding="utf-8")
-    tr.main(["convert", str(export)])
+    wealthfolio.add_account("Example Broker")
+    assert tr.main(["import", str(export_file(data_dir)), "--commit"]) == 0
     out = capsys.readouterr().out
     assert "2026-03: DIVIDEND 1, INTEREST 1, SELL 1, WITHDRAWAL 2" in out
     assert "DEPOSIT EUR: 1500.00" in out
@@ -422,6 +806,8 @@ def test_summary_holds_counts_and_totals_but_no_personal_text(
         "Example Person",
         "Example reference",
         "Example Corp",
+        "Example Broker",
+        TOKEN,
     ):
         assert secret not in out
 
@@ -430,37 +816,28 @@ def test_missing_config_is_reported(
     data_dir: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     (data_dir / "config.local.toml").unlink()
-    export = data_dir / "inbox/trade-republic/export.csv"
-    export.write_text(read("all-types.csv"), encoding="utf-8")
-    assert tr.main(["convert", str(export)]) == 1
+    assert tr.main(["import", str(export_file(data_dir))]) == 1
     assert "config.example.toml" in capsys.readouterr().err
 
 
-def test_all_includes_rows_from_earlier_runs(
+def test_a_config_without_the_wealthfolio_table_names_the_missing_key(
     data_dir: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    export = data_dir / "inbox/trade-republic/export.csv"
-    export.write_text(read("all-types.csv"), encoding="utf-8")
-    tr.main(["convert", str(export), "--write"])
-    (data_dir / "out/trade-republic/export.wealthfolio.csv").unlink()
-    capsys.readouterr()
-    assert tr.main(["convert", str(export), "--all", "--write"]) == 0
-    assert "already in the ledger: 13, in this run: 13" in capsys.readouterr().out
-    with (data_dir / "out/trade-republic/export.wealthfolio.csv").open(
-        encoding="utf-8"
-    ) as handle:
-        assert len(list(csv.DictReader(handle))) == 13
+    (data_dir / "config.local.toml").write_text(
+        '[trade_republic.accounts]\nDEFAULT = "Example Broker"\n', encoding="utf-8"
+    )
+    assert tr.main(["import", str(export_file(data_dir))]) == 1
+    assert "needs [wealthfolio] mcp_url" in capsys.readouterr().err
 
 
 def test_the_working_directory_is_the_data_dir_when_it_holds_a_config(
-    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    data_dir: Path, wealthfolio: FakeWealthfolio, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    wealthfolio.add_account("Example Broker")
     monkeypatch.delenv("FINANCE_DIR")
     monkeypatch.chdir(data_dir)
-    export = data_dir / "inbox/trade-republic/export.csv"
-    export.write_text(read("all-types.csv"), encoding="utf-8")
-    assert tr.main(["convert", str(export), "--write"]) == 0
-    assert (data_dir / "out/trade-republic/export.wealthfolio.csv").is_file()
+    assert tr.main(["import", str(export_file(data_dir)), "--commit"]) == 0
+    assert len(ledger_ids(data_dir)) == 13
 
 
 def run_script(
@@ -476,17 +853,19 @@ def run_script(
     )
 
 
-def test_uv_run_converts_and_writes_like_a_user_run(data_dir: Path) -> None:
-    export = data_dir / "inbox/trade-republic/polish.csv"
-    export.write_text(read("polish.csv"), encoding="utf-8")
+def test_uv_run_previews_and_imports_like_a_user_run(
+    data_dir: Path, wealthfolio: FakeWealthfolio
+) -> None:
+    export = export_file(data_dir, "polish.csv")
     env = {"FINANCE_DIR": str(data_dir)}
-    dry = run_script("convert", str(export), cwd=data_dir, env=env)
+    dry = run_script("import", str(export), cwd=data_dir, env=env)
     assert dry.returncode == 0, dry.stderr
     assert "decimal separator: ','" in dry.stdout
-    assert not (data_dir / "out").exists()
-    wet = run_script("convert", str(export), "--write", cwd=data_dir, env=env)
+    assert not wealthfolio.stored
+    wet = run_script("import", str(export), "--commit", cwd=data_dir, env=env)
     assert wet.returncode == 0, wet.stderr
-    assert (data_dir / "out/trade-republic/polish.wealthfolio.csv").is_file()
+    assert len(wealthfolio.stored) == 5
+    assert len(ledger_ids(data_dir)) == 5
 
 
 def test_uv_run_inspect_fails_cleanly_on_a_missing_file(tmp_path: Path) -> None:
@@ -529,7 +908,7 @@ def test_duplicates_that_earlier_runs_wrote_are_not_reported_again() -> None:
 def test_a_cancelled_buy_after_earlier_runs_may_be_in_wealthfolio_already() -> None:
     text = read("all-types.csv").replace('"BUY","BOND"', '"BUY_CANCELLED","STOCK"')
     report = tr.summarize(tr.convert(text, ACCOUNTS), {"earlier"}, [])
-    assert "still in this CSV, or in Wealthfolio if an earlier run wrote it" in report
+    assert "in this run, or in Wealthfolio if an earlier import holds it" in report
 
 
 def test_summary_asks_to_confirm_gross_income_when_income_is_taxed() -> None:
@@ -571,3 +950,22 @@ def test_a_shifted_date_in_a_number_column_does_not_break_decimal_detection() ->
     assert result.decimal == ","
     assert [u.reason for u in result.unmapped] == ["wrong number of cells"]
     assert tr.detect_decimal(["12,50", "04.05.2026", "Example"]) == ","
+
+
+def test_a_ledger_of_the_csv_version_is_refused_not_trusted(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ledger = data_dir / "out/trade-republic/ledger.json"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text('{"transaction_ids": []}', encoding="utf-8")
+    assert tr.main(["import", str(export_file(data_dir))]) == 1
+    assert "from the CSV version of this skill" in capsys.readouterr().err
+
+
+def test_the_example_config_holds_every_key_the_script_reads() -> None:
+    path = SCRIPT.parents[1] / "config.example.toml"
+    config = tr.load_config(path)
+    assert tr.load_accounts(config, path) == {"DEFAULT": "Trade Republic"}
+    wealthfolio = tr.load_wealthfolio(config, path)
+    assert wealthfolio.url.endswith("/mcp")
+    assert wealthfolio.token_command[0] == "pass-cli"

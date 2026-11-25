@@ -4,9 +4,9 @@ Agent Skills for Pi, Codex, Claude Code and Antigravity.
 
 ## Skills
 
-| Skill                              | Category  | Does                                                 |
-| ---------------------------------- | --------- | ---------------------------------------------------- |
-| [`trade-republic`][trade-republic] | `finance` | Trade Republic transaction export to Wealthfolio CSV |
+| Skill                              | Category  | Does                                                                       |
+| ---------------------------------- | --------- | -------------------------------------------------------------------------- |
+| [`trade-republic`][trade-republic] | `finance` | Trade Republic transaction export into Wealthfolio, through its MCP server |
 
 Each skill lives in `skills/<category>/<name>/`, with a `README.md` for users.
 
