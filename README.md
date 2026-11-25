@@ -36,7 +36,7 @@ Install them in the data directory, for Pi alone, so no hosted agent loads them:
 $ npx skills add pawelad/skills@<tag> --skill trade-republic -a pi
 ```
 
-The [skill's README][trade-republic] covers the data directory and the Pi command.
+The [skill's README][trade-republic] covers the data directory and the Pi launcher.
 
 ## Development
 

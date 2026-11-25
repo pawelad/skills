@@ -24,15 +24,28 @@ CSV. Pi runs it with your local model. The model sees only a redacted summary.
    $ cp .agents/skills/trade-republic/config.example.toml config.local.toml
    ```
 
-4. Start Pi in the data directory with your local model and only this skill:
+4. Save a launcher as `~/.local/bin/pi-finance` and make it executable. This example
+   uses Pi's llama.cpp provider:
 
-   ```console
-   $ pi --model <provider>/<model> --no-skills --skill .agents/skills/trade-republic \
-       --no-extensions -e <provider extension, if any>
+   ```sh
+   #!/bin/sh
+   set -eu
+   export FINANCE_DIR="${FINANCE_DIR:-$HOME/Data/Finance}"
+   export PI_CODING_AGENT_DIR="$FINANCE_DIR/.pi-agent"
+   cd "$FINANCE_DIR"
+   exec pi --no-extensions -e builtin:llama.cpp --no-skills --skill .agents/skills "$@"
    ```
 
-   `--no-extensions` keeps other extensions out of the session. For example, Pi's
-   llama.cpp provider needs `-e builtin:llama.cpp`.
+   - `FINANCE_DIR` tells the skill where the data directory is. Set it to use another
+     one.
+   - `PI_CODING_AGENT_DIR` gives Pi a separate config directory. Your global extensions,
+     skills, credentials and sessions stay out of it.
+   - Sessions hold your data, so they stay in the data directory.
+   - `--no-extensions` keeps other extensions out. `-e` loads only the model provider.
+   - `--skill .agents/skills` loads each finance skill installed in the data directory.
+
+5. Run `pi-finance`, then `/login llama.cpp` to connect your server. Set the default
+   model with `/model`.
 
 ## Use
 
