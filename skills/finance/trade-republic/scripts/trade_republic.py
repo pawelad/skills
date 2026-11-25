@@ -958,6 +958,50 @@ def save_ledger(path: Path, ids: set[str]) -> None:
 
 Batch = list[tuple[Activity, dict[str, Any]]]
 
+# The asset fields of a checked row. The commit gets them back, so that it imports
+# the assets the preview showed instead of resolving each symbol again.
+IDENTITY_FIELDS = (
+    "assetId",
+    "symbol",
+    "instrumentType",
+    "exchangeMic",
+    "quoteCcy",
+    "quoteMode",
+    "providerId",
+    "providerSymbol",
+)
+# A provider symbol or exchange code, such as `VWCE.DE` or `XETR`.
+TICKER_RE = re.compile(r"^[A-Za-z0-9.:=^-]{1,24}$")
+
+
+def keep_identity(
+    sent: dict[str, Any], checked: dict[str, Any], assets: dict[str, set[str]]
+) -> None:
+    """Copy a checked row's asset fields into the row to commit, and note them.
+
+    `assets` collects, per ISIN, how Wealthfolio resolved it: ticker, exchange
+    and quote currency, or `not resolved`.
+    """
+    for name in IDENTITY_FIELDS:
+        if checked.get(name) not in {None, ""}:
+            sent[name] = checked[name]
+    isin = sent.get("isin")
+    if not isin:
+        return
+
+    def code(name: str) -> str:
+        value = str(checked.get(name) or "")
+        return (value if TICKER_RE.match(value) else shape(value)) or "-"
+
+    if not checked.get("providerSymbol") and not checked.get("assetId"):
+        assets[isin].add("not resolved")
+        return
+    stored = ", stored asset" if checked.get("assetId") else ""
+    assets[isin].add(
+        f"{code('providerSymbol')} on {code('exchangeMic')},"
+        f" quote {code('quoteCcy')}{stored}"
+    )
+
 
 @dataclass
 class Tally:
@@ -1101,11 +1145,16 @@ class Sync:
         errors: dict[str, list[int]] = defaultdict(list)
         warnings: dict[str, list[int]] = defaultdict(list)
         duplicates: list[int] = []
+        assets: dict[str, set[str]] = defaultdict(set)
         for batch in batches:
             output = self.mcp.call(
                 "prepare_activity_import", {"activities": [row for _, row in batch]}
             )
-            for row in output.get("rows", []):
+            checked = output.get("rows", [])
+            if len(checked) != len(batch):
+                raise McpError("prepare_activity_import sent another number of rows.")
+            for (_, sent), row in zip(batch, checked, strict=True):
+                keep_identity(sent, row, assets)
                 rows += 1
                 if not row.get("isValid") or row.get("errors"):
                     invalid += 1
@@ -1121,6 +1170,13 @@ class Sync:
             self.report.append(f"  already in Wealthfolio: {lines_of(duplicates)}")
         self.report.extend(grouped("invalid rows:", errors))
         self.report.extend(grouped("warnings:", warnings))
+        self.report.append("assets as Wealthfolio resolved them:")
+        self.report.extend(
+            f"  {isin}: {'; '.join(sorted(found))}"
+            for isin, found in sorted(assets.items())
+        )
+        if not assets:
+            self.report.append("  none")
         return invalid
 
     def import_batches(

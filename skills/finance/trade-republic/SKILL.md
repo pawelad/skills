@@ -76,6 +76,9 @@ Run the commands from the data directory, the one that holds `config.local.toml`
      currency.
    - The `Wealthfolio preview` line: invalid rows, warnings and rows that Wealthfolio
      already holds. The commit skips those.
+   - The `assets as Wealthfolio resolved them` list. Ask the user to confirm each
+     listing and quote currency. A `not resolved` ISIN or a wrong listing needs a fix in
+     Wealthfolio before the commit. The commit imports the listed assets.
    - A `missing` account. `--commit` creates it as Securities, Transactions mode, in the
      rows' currency. Its cost basis is FIFO, Wealthfolio's default.
    - A `BUY_CANCELLED` line: the cancelled BUY is in the run. After the import, the user

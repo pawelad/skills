@@ -138,7 +138,15 @@ class FakeWealthfolio:
     def check(self, row: dict[str, Any]) -> dict[str, Any]:
         """Validate a row and flag it when Wealthfolio has it."""
         error = self.invalid.get(row["comment"])
-        return {
+        identity = {}
+        if row.get("isin"):
+            identity = {
+                "providerId": "YAHOO",
+                "providerSymbol": f"{row['isin'][-4:]}.DE",
+                "exchangeMic": "XETR",
+                "quoteCcy": "EUR",
+            }
+        return identity | {
             "lineNumber": row["lineNumber"],
             "isValid": error is None,
             "isDuplicate": (row["accountId"], row["comment"]) in self.stored,
@@ -616,6 +624,9 @@ def test_commit_imports_each_row_with_its_transaction_id_as_comment(
     assert "commit: imported 13, draft 0, duplicate_skipped 0, failed 0" in out
     assert {key[0] for key in wealthfolio.stored} == {account_id}
     assert (account_id, comment(4)) in wealthfolio.stored
+    assert "  US00EXAMPLE2: PLE2.DE on XETR, quote EUR\n" in out
+    # The commit imports the assets the preview resolved.
+    assert wealthfolio.stored[account_id, comment(4)]["providerSymbol"] == "PLE2.DE"
     assert len(ledger_ids(data_dir)) == 13
     assert not wealthfolio.tool_calls("commit_account_change")
 
