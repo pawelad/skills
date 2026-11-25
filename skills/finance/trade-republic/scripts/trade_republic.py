@@ -1211,6 +1211,11 @@ class Sync:
                     " imported none of it: a row failed its validation."
                 )
         self.report.extend(tally.lines())
+        if tally.statuses["failed"]:
+            raise ExportError(
+                f"{tally.statuses['failed']} rows failed while Wealthfolio wrote them."
+                " The ledger leaves them out, so a rerun sends them again."
+            )
 
 
 def data_dir() -> Path:

@@ -90,6 +90,8 @@ class FakeWealthfolio:
         # Tool name and the call number that answers HTTP 500.
         self.fail: tuple[str, int] | None = None
         self.drafts: set[str] = set()
+        # Comments of rows that pass the check but fail while being written.
+        self.write_failures: set[str] = set()
         # Comment and the error Wealthfolio gives the row.
         self.invalid: dict[str, str] = {}
         self.sse = False
@@ -163,7 +165,9 @@ class FakeWealthfolio:
         statuses = []
         for index, row in enumerate(rows):
             key = (row["accountId"], row["comment"])
-            if key in self.stored:
+            if row["comment"] in self.write_failures:
+                status = "failed"
+            elif key in self.stored:
                 status = "duplicate_skipped"
             else:
                 self.stored[key] = row
@@ -686,6 +690,19 @@ def test_rows_wealthfolio_saves_as_drafts_are_listed_for_approval(
     assert "commit: imported 12, draft 1, duplicate_skipped 0, failed 0" in out
     assert "drafts on lines [2]: Wealthfolio could not set their cash amount." in out
     assert len(ledger_ids(data_dir)) == 13
+
+
+def test_a_row_that_fails_while_written_fails_the_run_and_stays_out_of_the_ledger(
+    data_dir: Path, wealthfolio: FakeWealthfolio, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wealthfolio.add_account("Example Broker")
+    wealthfolio.write_failures = {comment(4)}
+    assert tr.main(["import", str(export_file(data_dir)), "--commit"]) == 1
+    captured = capsys.readouterr()
+    assert "commit: imported 12, draft 0, duplicate_skipped 0, failed 1" in captured.out
+    assert "1 rows failed while Wealthfolio wrote them." in captured.err
+    assert comment(4)[3:] not in ledger_ids(data_dir)
+    assert len(ledger_ids(data_dir)) == 12
 
 
 def test_rows_wealthfolio_finds_invalid_block_the_commit_and_hide_names(

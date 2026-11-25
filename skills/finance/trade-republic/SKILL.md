@@ -125,5 +125,7 @@ send the ledger's rows again.
 - `batch N of M failed`: Wealthfolio holds the earlier batches, and the ledger lists
   them. Show the report. After the user fixes the cause, rerun with `--commit`.
   Wealthfolio skips any row of the failed batch that it stored.
+- `N rows failed while Wealthfolio wrote them`: the other rows are imported. Show the
+  `failed rows` list. A rerun with `--commit` sends only the failed rows' IDs again.
 - `Nothing imported: Wealthfolio finds N rows invalid`: show the `invalid rows` list. Do
   not change the export or guess a fix.
