@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 
 # The session protocol. Wealthfolio 3.13.1 also takes the sessionless 2026-07-28 one.
 PROTOCOL_VERSION = "2025-03-26"
+# The version whose source gave the tool names and input schemas.
+TESTED_VERSION = "3.13.1"
 # Seconds. An import looks up new assets at market data providers.
 MCP_TIMEOUT = 300
 TOKEN_TIMEOUT = 60
@@ -159,6 +161,7 @@ class Mcp:
         """Keep the endpoint and the token. `with` opens and closes the session."""
         self.url = url
         self.server = ""
+        self.version = ""
         self._headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
@@ -178,6 +181,7 @@ class Mcp:
             },
         )
         info = result.get("serverInfo", {})
+        self.version = str(info.get("version", ""))
         server = f"{info.get('name', '?')} {info.get('version', '?')}"
         self.server = re.sub(r"[^\w. -]", "", server)[:60]
         self._headers["MCP-Protocol-Version"] = str(

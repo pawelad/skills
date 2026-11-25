@@ -29,7 +29,14 @@ from itertools import batched
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from wealthfolio_mcp import Mcp, McpError, load_wealthfolio, read_token, scrub
+from wealthfolio_mcp import (
+    TESTED_VERSION,
+    Mcp,
+    McpError,
+    load_wealthfolio,
+    read_token,
+    scrub,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
@@ -1264,6 +1271,11 @@ def run_check(args: argparse.Namespace, report: list[str]) -> None:
     report.append("token command: ok")
     with Mcp(wealthfolio.url, token) as mcp:
         report.append(f"server: {mcp.server}")
+        if mcp.version != TESTED_VERSION:
+            report.append(
+                f"This skill was built against Wealthfolio {TESTED_VERSION}. If a"
+                " tool below says no, or an import fails, its tools may have changed."
+            )
         tools = mcp.tool_names()
         report.append("tools the token reaches:")
         report.extend(

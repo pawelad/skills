@@ -135,6 +135,8 @@ To undo an import, delete its activities in Wealthfolio, then rerun with `--all`
 
 ## Limits
 
+- The script uses the MCP tools of Wealthfolio 3.13.1. `check` says when your server
+  runs another version.
 - Wealthfolio's MCP server cannot set an account's cost basis method. A new account gets
   FIFO, Wealthfolio's default. Change it in the app if you want another.
 - Splits, saveback, gifts, bonds and crypto are listed as unmapped. Add them in

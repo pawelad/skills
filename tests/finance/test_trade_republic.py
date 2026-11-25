@@ -96,6 +96,7 @@ class FakeWealthfolio:
         self.invalid: dict[str, str] = {}
         self.sse = False
         self.redirect = False
+        self.version = "3.13.1"
 
     def add_account(self, name: str, currency: str = "EUR", **extra: Any) -> str:  # noqa: ANN401
         """Store an account and return its ID."""
@@ -238,7 +239,7 @@ class Handler(BaseHTTPRequestHandler):
         if method == "initialize":
             return {
                 "protocolVersion": "2025-03-26",
-                "serverInfo": {"name": "wealthfolio", "version": "3.13.1"},
+                "serverInfo": {"name": "wealthfolio", "version": fake.version},
                 "capabilities": {"tools": {}},
             }
         if method == "tools/list":
@@ -795,14 +796,17 @@ def test_check_reports_scopes_and_accounts_without_their_names(
     assert "token command: ok\nserver: wealthfolio 3.13.1\n" in out
     assert "  commit_activity_import: yes\n" in out
     assert "  DEFAULT: found\n" in out
+    assert "built against Wealthfolio" not in out
     assert "remove accounts:write from the token" in out
     assert "Example Broker" not in out
     assert TOKEN not in out
     wealthfolio.accounts[0]["isArchived"] = True
+    wealthfolio.version = "3.14.0"
     wealthfolio.tools -= {"commit_account_change", "prepare_account_change"}
     assert tr.main(["check"]) == 0
     out = capsys.readouterr().out
     assert "  DEFAULT: archived or hidden\n" in out
+    assert "built against Wealthfolio 3.13.1" in out
     assert "  commit_account_change: no, needs accounts:write\n" in out
 
 
